@@ -5,7 +5,7 @@ A Google Apps Script service that bridges Garmin InReach satellite messengers wi
 Coded with Claude.
 
 
-![Garmin AI Gateway Response Example](img.png)
+![Garmin AI Gateway Response Example](img.jpg)
 *Actual response to a diesel engine troubleshooting query - demonstrating the system's ability to provide technical diagnostic steps within satellite message constraints*
 
 ## Features
