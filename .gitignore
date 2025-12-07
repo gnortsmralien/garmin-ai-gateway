@@ -1,0 +1,37 @@
+# Development and IDE files
+.idea/
+.vscode/
+*.iml
+.eslintrc.json
+.prettierrc.json
+.prettierignore
+
+# Node.js dependencies and config
+node_modules/
+package.json
+package-lock.json
+.npmrc
+
+# Google Apps Script CLI files
+.clasp.json
+.claspignore
+
+# Test runners (local Node.js scripts)
+run-tests.js
+run-integration-tests.js
+verify-syntax.js
+test.html
+
+# Environment and config files
+.env
+.env.local
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor backup files
+*~
+*.swp
+*.swo
