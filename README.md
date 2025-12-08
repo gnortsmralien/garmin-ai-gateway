@@ -83,7 +83,7 @@ Users can trigger specialized tools by including keywords in their messages:
      - Function: `runGateway`
      - Event source: Time-driven
      - Type: Minutes timer
-     - Interval: Every 5 minutes (or your preference)
+     - Interval: Every 1 minutes (or your preference)
 
 7. **Configure your InReach device**
    - Send messages directly from your InReach device to any email address you monitor with Gmail
