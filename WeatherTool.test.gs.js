@@ -1,5 +1,6 @@
 /**
  * Unit Tests for WeatherTool
+ * Tests the wttr.in API integration
  *
  * Run these tests by calling: runWeatherToolTests()
  */
@@ -10,25 +11,53 @@ function runWeatherToolTests() {
   // Test 1: Successful weather fetch
   runner.test("WeatherTool - successful fetch returns current and forecast", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      current: {
-        temperature_2m: 15.5,
-        relative_humidity_2m: 65,
-        precipitation: 0,
-        weather_code: 2,
-        wind_speed_10m: 12,
-        wind_direction_10m: 180
-      },
-      daily: {
-        time: ["2024-01-15", "2024-01-16", "2024-01-17"],
-        temperature_2m_max: [18, 20, 19],
-        temperature_2m_min: [12, 14, 13],
-        precipitation_probability_max: [20, 40, 10],
-        weather_code: [2, 61, 1]
-      }
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [{
+        temp_C: "15",
+        weatherDesc: [{ value: "Partly cloudy" }],
+        windspeedKmph: "12",
+        humidity: "65"
+      }],
+      weather: [{
+        date: "2024-01-15",
+        maxtempC: "18",
+        mintempC: "12",
+        hourly: [
+          { chanceofrain: "10", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "15", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "20", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "25", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "20", weatherDesc: [{ value: "Partly cloudy" }] }
+        ],
+        astronomy: [{ sunrise: "07:30 AM", sunset: "06:45 PM" }]
+      }, {
+        date: "2024-01-16",
+        maxtempC: "20",
+        mintempC: "14",
+        hourly: [
+          { chanceofrain: "30", weatherDesc: [{ value: "Light rain" }] },
+          { chanceofrain: "40", weatherDesc: [{ value: "Light rain" }] },
+          { chanceofrain: "35", weatherDesc: [{ value: "Light rain" }] },
+          { chanceofrain: "30", weatherDesc: [{ value: "Cloudy" }] },
+          { chanceofrain: "25", weatherDesc: [{ value: "Light rain" }] }
+        ],
+        astronomy: [{ sunrise: "07:31 AM", sunset: "06:46 PM" }]
+      }, {
+        date: "2024-01-17",
+        maxtempC: "19",
+        mintempC: "13",
+        hourly: [
+          { chanceofrain: "10", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "5", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "5", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "10", weatherDesc: [{ value: "Sunny" }] },
+          { chanceofrain: "10", weatherDesc: [{ value: "Clear" }] }
+        ],
+        astronomy: [{ sunrise: "07:32 AM", sunset: "06:47 PM" }]
+      }]
     });
 
     var result = tool.fetch(40.4168, -3.7038);
@@ -36,31 +65,47 @@ function runWeatherToolTests() {
     assertTrue(result.success, "Should succeed");
     assertNotNull(result.data, "Should have data");
     assertContains(result.data, "NOW:", "Should contain current weather");
-    assertContains(result.data, "15.5°C", "Should contain temperature");
-    assertContains(result.data, "Partly cloudy", "Should decode weather code");
+    assertContains(result.data, "15°C", "Should contain temperature");
+    assertContains(result.data, "Partly cloudy", "Should contain weather description");
     assertContains(result.data, "Today:", "Should contain today's forecast");
     assertContains(result.data, "Tomorrow:", "Should contain tomorrow's forecast");
   });
 
-  // Test 2: Weather code conversion
-  runner.test("WeatherTool - converts weather codes correctly", function() {
+  // Test 2: Weather description extraction
+  runner.test("WeatherTool - extracts weather description correctly", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    assertEquals(tool.weatherCodeToText(0), "Clear");
-    assertEquals(tool.weatherCodeToText(61), "Light rain");
-    assertEquals(tool.weatherCodeToText(95), "Thunderstorm");
-    assertEquals(tool.weatherCodeToText(999), "Code 999"); // Unknown code
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [{
+        temp_C: "22",
+        weatherDesc: [{ value: "Thunderstorm" }],
+        windspeedKmph: "25",
+        humidity: "80"
+      }],
+      weather: [{
+        date: "2024-01-15",
+        maxtempC: "25",
+        mintempC: "18",
+        hourly: [{ chanceofrain: "80", weatherDesc: [{ value: "Heavy rain" }] }]
+      }]
+    });
+
+    var result = tool.fetch(40.4168, -3.7038);
+
+    assertTrue(result.success, "Should succeed");
+    assertContains(result.data, "Thunderstorm", "Should show current thunderstorm");
+    assertContains(result.data, "Heavy rain", "Should show forecast rain");
   });
 
   // Test 3: HTTP error handling
   runner.test("WeatherTool - handles HTTP errors", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockResponse("open-meteo.com", 500, "Server Error");
+    mockHttp.mockResponse("wttr.in", 500, "Server Error");
 
     var result = tool.fetch(40.4168, -3.7038);
 
@@ -71,10 +116,10 @@ function runWeatherToolTests() {
   // Test 4: Malformed JSON
   runner.test("WeatherTool - handles malformed JSON", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockResponse("open-meteo.com", 200, "invalid json");
+    mockHttp.mockResponse("wttr.in", 200, "invalid json");
 
     var result = tool.fetch(40.4168, -3.7038);
 
@@ -85,132 +130,146 @@ function runWeatherToolTests() {
   // Test 5: URL contains correct parameters
   runner.test("WeatherTool - builds URL with correct parameters", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      current: {},
-      daily: { time: [] }
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [],
+      weather: []
     });
 
     tool.fetch(52.52, 13.41);
 
     var requests = mockHttp.getRequests();
     assertEquals(requests.length, 1, "Should make one request");
-    assertContains(requests[0].url, "latitude=52.52", "Should include latitude");
-    assertContains(requests[0].url, "longitude=13.41", "Should include longitude");
-    assertContains(requests[0].url, "forecast_days=3", "Should include forecast days");
-    assertContains(requests[0].url, "timezone=auto", "Should include timezone");
+    assertContains(requests[0].url, "52.52,13.41", "Should include coordinates");
+    assertContains(requests[0].url, "format=j1", "Should request JSON format");
   });
 
-  // Test 6: Successful astronomy fetch
-  runner.test("WeatherTool - fetchAstronomy returns sun times", function() {
+  // Test 6: Astronomy data in combined fetch
+  runner.test("WeatherTool - includes astronomy when requested", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      daily: {
-        time: ["2024-01-15", "2024-01-16"],
-        sunrise: ["2024-01-15T07:30", "2024-01-16T07:31"],
-        sunset: ["2024-01-15T18:45", "2024-01-16T18:46"],
-        daylight_duration: [40500, 40560]
-      }
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [{
+        temp_C: "15",
+        weatherDesc: [{ value: "Clear" }],
+        windspeedKmph: "5",
+        humidity: "50"
+      }],
+      weather: [{
+        date: "2024-01-15",
+        maxtempC: "18",
+        mintempC: "12",
+        hourly: [{ chanceofrain: "0", weatherDesc: [{ value: "Sunny" }] }],
+        astronomy: [{ sunrise: "07:30 AM", sunset: "06:45 PM" }]
+      }, {
+        date: "2024-01-16",
+        maxtempC: "20",
+        mintempC: "14",
+        hourly: [{ chanceofrain: "10", weatherDesc: [{ value: "Partly cloudy" }] }],
+        astronomy: [{ sunrise: "07:31 AM", sunset: "06:46 PM" }]
+      }]
     });
 
-    var result = tool.fetchAstronomy(40.4168, -3.7038);
+    var result = tool.fetch(40.4168, -3.7038, null, true);  // includeAstronomy = true
 
     assertTrue(result.success, "Should succeed");
-    assertContains(result.data, "Today:", "Should contain today");
-    assertContains(result.data, "Sunrise 07:30", "Should contain sunrise time");
-    assertContains(result.data, "Sunset 18:45", "Should contain sunset time");
-    assertContains(result.data, "11.3hr daylight", "Should calculate daylight hours");
+    assertNotNull(result.astronomy, "Should have astronomy data");
+    assertContains(result.astronomy, "Sunrise", "Should contain sunrise");
+    assertContains(result.astronomy, "Sunset", "Should contain sunset");
+    assertContains(result.astronomy, "Today:", "Should have today's astronomy");
+    assertContains(result.astronomy, "Tomorrow:", "Should have tomorrow's astronomy");
   });
 
-  // Test 7: Astronomy with missing data
-  runner.test("WeatherTool - fetchAstronomy handles missing data", function() {
+  // Test 7: Astronomy data not included by default
+  runner.test("WeatherTool - excludes astronomy by default", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      daily: {
-        time: ["2024-01-15"],
-        sunrise: [null],
-        sunset: [null],
-        daylight_duration: [null]
-      }
-    });
-
-    var result = tool.fetchAstronomy(90, 0); // North pole
-
-    assertTrue(result.success, "Should succeed");
-    assertContains(result.data, "N/A", "Should show N/A for missing data");
-  });
-
-  // Test 8: Custom forecast days configuration
-  runner.test("WeatherTool - respects custom forecast days", function() {
-    var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig("https://api.open-meteo.com/v1/forecast", 5);
-    var tool = new WeatherTool(mockHttp, config);
-
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      current: {},
-      daily: { time: [] }
-    });
-
-    tool.fetch(40.4168, -3.7038);
-
-    var requests = mockHttp.getRequests();
-    assertContains(requests[0].url, "forecast_days=5", "Should use custom forecast days");
-  });
-
-  // Test 9: Empty daily data
-  runner.test("WeatherTool - handles missing daily data", function() {
-    var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
-    var tool = new WeatherTool(mockHttp, config);
-
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      current: {
-        temperature_2m: 15.5,
-        relative_humidity_2m: 65,
-        precipitation: 0,
-        weather_code: 2,
-        wind_speed_10m: 12,
-        wind_direction_10m: 180
-      }
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [{
+        temp_C: "20",
+        weatherDesc: [{ value: "Sunny" }],
+        windspeedKmph: "10",
+        humidity: "55"
+      }],
+      weather: [{
+        date: "2024-01-15",
+        maxtempC: "22",
+        mintempC: "15",
+        hourly: [{ chanceofrain: "0", weatherDesc: [{ value: "Sunny" }] }],
+        astronomy: [{ sunrise: "06:00 AM", sunset: "08:00 PM" }]
+      }]
     });
 
     var result = tool.fetch(40.4168, -3.7038);
 
     assertTrue(result.success, "Should succeed");
-    assertContains(result.data, "NOW:", "Should have current weather");
-    // Should not crash even without daily data
+    assertEquals(result.astronomy, null, "Should not have astronomy by default");
+  });
+
+  // Test 8: Custom base URL
+  runner.test("WeatherTool - respects custom base URL", function() {
+    var mockHttp = new MockHttpClient();
+    var config = new WeatherConfig("https://custom-weather.example.com");
+    var tool = new WeatherTool(mockHttp, config);
+
+    mockHttp.mockJsonResponse("custom-weather.example.com", {
+      current_condition: [],
+      weather: []
+    });
+
+    tool.fetch(40.4168, -3.7038);
+
+    var requests = mockHttp.getRequests();
+    assertContains(requests[0].url, "custom-weather.example.com", "Should use custom URL");
+  });
+
+  // Test 9: Empty weather data
+  runner.test("WeatherTool - handles missing current condition", function() {
+    var mockHttp = new MockHttpClient();
+    var config = new WeatherConfig("https://wttr.in");
+    var tool = new WeatherTool(mockHttp, config);
+
+    mockHttp.mockJsonResponse("wttr.in", {
+      weather: [{
+        date: "2024-01-15",
+        maxtempC: "18",
+        mintempC: "12",
+        hourly: [{ chanceofrain: "20", weatherDesc: [{ value: "Cloudy" }] }]
+      }]
+    });
+
+    var result = tool.fetch(40.4168, -3.7038);
+
+    assertTrue(result.success, "Should succeed even without current conditions");
+    assertContains(result.data, "Today:", "Should still have forecast");
   });
 
   // Test 10: Limits forecast to 3 days
   runner.test("WeatherTool - limits forecast output to 3 days", function() {
     var mockHttp = new MockHttpClient();
-    var config = new WeatherConfig();
+    var config = new WeatherConfig("https://wttr.in");
     var tool = new WeatherTool(mockHttp, config);
 
-    mockHttp.mockJsonResponse("open-meteo.com", {
-      current: {
-        temperature_2m: 15,
-        relative_humidity_2m: 60,
-        precipitation: 0,
-        weather_code: 0,
-        wind_speed_10m: 10,
-        wind_direction_10m: 180
-      },
-      daily: {
-        time: ["2024-01-15", "2024-01-16", "2024-01-17", "2024-01-18", "2024-01-19"],
-        temperature_2m_max: [18, 20, 19, 21, 22],
-        temperature_2m_min: [12, 14, 13, 15, 16],
-        precipitation_probability_max: [20, 40, 10, 30, 50],
-        weather_code: [2, 61, 1, 3, 63]
-      }
+    mockHttp.mockJsonResponse("wttr.in", {
+      current_condition: [{
+        temp_C: "15",
+        weatherDesc: [{ value: "Clear" }],
+        windspeedKmph: "10",
+        humidity: "60"
+      }],
+      weather: [
+        { date: "2024-01-15", maxtempC: "18", mintempC: "12", hourly: [{ chanceofrain: "10", weatherDesc: [{ value: "Sunny" }] }] },
+        { date: "2024-01-16", maxtempC: "20", mintempC: "14", hourly: [{ chanceofrain: "20", weatherDesc: [{ value: "Cloudy" }] }] },
+        { date: "2024-01-17", maxtempC: "19", mintempC: "13", hourly: [{ chanceofrain: "15", weatherDesc: [{ value: "Sunny" }] }] },
+        { date: "2024-01-18", maxtempC: "21", mintempC: "15", hourly: [{ chanceofrain: "30", weatherDesc: [{ value: "Rain" }] }] },
+        { date: "2024-01-19", maxtempC: "22", mintempC: "16", hourly: [{ chanceofrain: "50", weatherDesc: [{ value: "Storm" }] }] }
+      ]
     });
 
     var result = tool.fetch(40.4168, -3.7038);
@@ -219,6 +278,9 @@ function runWeatherToolTests() {
     var lines = result.data.split("\n");
     // Should have: NOW + Today + Tomorrow + Day 3 = 4 lines max
     assertTrue(lines.length <= 4, "Should limit to 4 lines (current + 3 days)");
+    // Should NOT contain 4th or 5th day
+    assertFalse(result.data.indexOf("2024-01-18") !== -1, "Should not include day 4");
+    assertFalse(result.data.indexOf("2024-01-19") !== -1, "Should not include day 5");
   });
 
   return runner.run();

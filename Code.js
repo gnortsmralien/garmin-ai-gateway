@@ -35,6 +35,45 @@ const RETRY = {
 };
 
 // =============================================================================
+// =============================  ERROR MESSAGES  ==============================
+// =============================================================================
+
+/**
+ * User-facing error messages - kept concise for satellite message limits
+ * Format: { code: "ERR:CODE", message: "Short human message" }
+ */
+const ERROR_MESSAGES = {
+  NO_API_KEY: {
+    code: "ERR:CONFIG",
+    message: "System not configured. Admin: add GEMINI_KEY to Script Properties."
+  },
+  AI_PERMANENT_FAIL: {
+    code: "ERR:AI",
+    message: "AI failed. Try: shorter query, WIKI term, or NEWS instead."
+  },
+  AI_OVERLOADED: {
+    code: "ERR:BUSY",
+    message: "AI overloaded. Wait 1-2min, resend same msg."
+  },
+  MAX_RETRIES: {
+    code: "ERR:RETRY",
+    message: "Failed 3x. Wait 5min, try simpler query or WIKI/NEWS."
+  },
+  SEND_FAILED: {
+    code: "ERR:SEND",
+    message: "Reply failed. Resend your msg or try shorter query."
+  },
+  EXCEPTION: {
+    code: "ERR:SYS",
+    message: "System error. Resend msg. If persists, try WIKI term."
+  },
+  GARMIN_POST_FAILED: {
+    code: "ERR:GARMIN",
+    message: "Garmin reply failed. Check link valid. Try resending original msg."
+  }
+};
+
+// =============================================================================
 // =============================  TOOLBOX CONFIG  ==============================
 // =============================================================================
 
@@ -409,7 +448,7 @@ function runGateway() {
           // Hit max retries - star and send error to user
           lastMsg.star();
           clearRetryCount(messageId);
-          sendErrorToUser(targetUrl, "ERR:MAX_RETRY", "Request failed after 3 attempts. Try again later.");
+          sendErrorToUser(targetUrl, ERROR_MESSAGES.MAX_RETRIES.code, ERROR_MESSAGES.MAX_RETRIES.message);
           console.error(`[${logId}] ✗ MAX RETRIES REACHED (${newRetryCount})`);
           handleFailure(logId, userPrompt, `MAX_RETRIES:${result.reason}`);
         } else {
@@ -430,7 +469,7 @@ function runGateway() {
         // Hit max retries - star and send error to user
         lastMsg.star();
         clearRetryCount(messageId);
-        sendErrorToUser(targetUrl, "ERR:SYSTEM", "Processing error. Try simpler query.");
+        sendErrorToUser(targetUrl, ERROR_MESSAGES.EXCEPTION.code, ERROR_MESSAGES.EXCEPTION.message);
         handleFailure(logId, userPrompt, `EXCEPTION:${e.message || e}`);
       } else {
         // Leave unstarred - will retry
@@ -451,7 +490,7 @@ function runGateway() {
 function processAndSend(userPrompt, targetUrl, logId, coords) {
   const key = PropertiesService.getScriptProperties().getProperty('GEMINI_KEY');
   if (!key) {
-    sendErrorToUser(targetUrl, "ERR:NO_AI_KEY", "System config error. Contact admin.");
+    sendErrorToUser(targetUrl, ERROR_MESSAGES.NO_API_KEY.code, ERROR_MESSAGES.NO_API_KEY.message);
     return { success: false, reason: "NO_API_KEY" };
   }
 
@@ -543,8 +582,8 @@ function processAndSend(userPrompt, targetUrl, logId, coords) {
       console.log(`[${logId}] Retryable Gemini error, will retry: ${analysisResult.error.message}`);
       return { success: false, reason: "GEMINI_RETRYABLE" };
     } else {
-      // Permanent error - send simplified message to user
-      sendErrorToUser(targetUrl, "ERR:AI_FAIL", "AI processing failed. Try simpler query.");
+      // Permanent error - send helpful message to user
+      sendErrorToUser(targetUrl, ERROR_MESSAGES.AI_PERMANENT_FAIL.code, ERROR_MESSAGES.AI_PERMANENT_FAIL.message);
       return { success: false, reason: "PHASE1_FAILED" };
     }
   }

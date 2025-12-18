@@ -132,20 +132,6 @@ function testGdacs() {
 }
 
 /**
- * Run only Search tests
- */
-function testSearch() {
-  return runSearchToolTests();
-}
-
-/**
- * Run only Browse tests
- */
-function testBrowse() {
-  return runBrowseToolTests();
-}
-
-/**
  * Run only ReverseGeocode tests
  */
 function testReverseGeocode() {
