@@ -1,6 +1,8 @@
 # Garmin AI Gateway
 
-A Google Apps Script service that bridges Garmin InReach satellite messengers with AI responses via Gmail and Google Gemini. This gateway enables remote users with satellite messengers to access frontier AI, web search, weather data, news, and other information tools for wilderness activities, or areas without cellular coverage.
+A Google Apps Script service that bridges Garmin InReach satellite messengers with AI responses via Gmail and Google Gemini Interactions API. This gateway enables remote users with satellite messengers to access frontier AI with automatic web search and URL reading, plus weather data, news, and other information tools for wilderness activities or areas without cellular coverage.
+
+Powered by Google's Gemini Interactions API with built-in Google Search and conversation memory.
 
 Coded with Claude.
 
@@ -11,23 +13,28 @@ Coded with Claude.
 ## Features
 
 ### Core Capabilities
-- **AI-Powered Responses**: Uses Google Gemini to provide intelligent, context-aware responses optimized for satellite messaging constraints
+- **AI-Powered Responses**: Uses Google Gemini Interactions API for intelligent, context-aware responses optimized for satellite messaging constraints
+- **Automatic Web Search**: Built-in Google Search integration - AI automatically searches the web when needed for current information
+- **Conversation Memory**: Server-side conversation storage maintains context for 24 hours, enabling follow-up questions and multi-turn interactions
 - **Smart Compression**: Two-phase AI processing that first analyzes queries then compresses responses to fit within Garmin's 160-character limit
 - **Multi-Page Support**: Automatically paginates longer responses across multiple messages
 - **Retry Mechanism**: Built-in retry logic for handling temporary API failures
 
-### Available Tools
+### Automatic Features (No Keywords Needed)
+- **Web Search**: AI automatically searches Google when it needs current information
+- **Conversation Context**: Remembers previous messages for 24 hours (server-side storage)
+
+### Manual Tools
 Users can trigger specialized tools by including keywords in their messages:
 
 - **`WIKI <term>`**: Wikipedia article summaries
-- **`SEARCH <query>`**: Web search via DuckDuckGo
-- **`URL <link>`**: Fetch and summarize webpage content
 - **`NEWS`**: Latest news headlines
 - **`WEATHER`**: Current weather and forecast (requires GPS coordinates)
 - **`SUNRISE/SUNSET`**: Astronomy data (requires GPS coordinates)
 - **`FULL-WEATHER`**: Comprehensive weather data including UV, pressure, moon phase
 - **`DISASTERS`**: GDACS disaster alerts for nearby area (requires GPS coordinates)
 - **`ADDRESS`**: Reverse geocoding to get location name (requires GPS coordinates)
+- **`NEW`**: Start a fresh conversation (resets 24-hour context memory)
 - **`SIZE <number>`**: Override response length (e.g., `SIZE 500` for 500 characters)
 - **`HELP`**: Display available commands
 
@@ -50,14 +57,15 @@ Users can trigger specialized tools by including keywords in their messages:
    - Copy all `.js` and `.gs.js` files from this repository
    - In the Apps Script editor, create new script files for each:
      - `Code.js` (main file - this is already created by default)
+     - `GeminiInteractionsClient.gs.js` (NEW - Interactions API client)
+     - `InteractionStateManager.gs.js` (NEW - conversation state management)
      - `HttpClient.gs.js`
      - `WikipediaTool.gs.js`
-     - `SearchTool.gs.js`
-     - `BrowseTool.gs.js`
      - `WeatherTool.gs.js`
      - `NewsTool.gs.js`
      - `GdacsTool.gs.js`
      - `ReverseGeocodeTool.gs.js`
+     - (Note: SearchTool.gs.js and BrowseTool.gs.js are no longer needed - replaced by built-in tools)
      - (Add test files if you want to run tests)
 
 3. **Configure the manifest**
@@ -99,12 +107,14 @@ AI: your question here
 ```
 
 Examples:
-- `AI: What's the weather forecast?` (needs GPS enabled)
-- `AI: WIKI first aid for snake bites`
-- `AI: SEARCH trail conditions PCT Washington`
-- `AI: NEWS`
-- `AI: How do I purify water in the wilderness?`
-- `AI: SIZE 300 Explain how to build a shelter`
+- `AI: What's the weather forecast?` (needs GPS enabled - AI will use location data)
+- `AI: WIKI first aid for snake bites` (Wikipedia lookup)
+- `AI: What are current trail conditions on the PCT in Washington?` (AI automatically searches web)
+- `AI: Check https://weather.gov for alerts in my area` (AI automatically reads URL)
+- `AI: NEWS` (manual news tool)
+- `AI: How do I purify water in the wilderness?` (general knowledge + automatic search if needed)
+- `AI: SIZE 300 Explain how to build a shelter` (override response length)
+- `AI: NEW What's the capital of France?` (start fresh conversation, forget previous context)
 
 ### GPS-Based Features
 To use location-based tools (weather, astronomy, disasters, address), enable "Send Location" in your InReach message settings. The gateway will automatically extract coordinates from the message.
@@ -116,10 +126,11 @@ Key settings can be modified in `Code.js`:
 ```javascript
 const SYSTEM = {
   TRUSTED_EMAILS: ["no.reply.inreach@garmin.com"],  // Emails to accept messages from
-  MODEL_TAG: "gemini-flash-latest",                  // Gemini model to use
+  MODEL_TAG: "gemini-flash-latest",                  // Gemini model for Interactions API
   SEARCH_WINDOW: "newer_than:2d",                    // Gmail search window
   MAX_RETRIES: 3,                                    // Retry attempts for failures
-  ALERT_EMAIL: null                                  // Optional admin alert email
+  ALERT_EMAIL: null,                                 // Optional admin alert email
+  CONVERSATION_EXPIRY_HOURS: 24                      // Auto-start new conversation after this period
 };
 ```
 
@@ -144,8 +155,11 @@ npm run lint
 ## Architecture
 
 - **Email Processing**: Monitors Gmail for InReach messages and extracts queries
-- **Tool System**: Modular tools for different data sources (Wikipedia, weather, news, etc.)
-- **AI Pipeline**: Two-phase processing - analysis then compression
+- **Garmin Reply Handling**: Supports both legacy URLs and new `inreachlink.com` short URLs with automatic form value extraction
+- **Interactions API Client**: Uses Gemini Interactions API (`/v1beta/interactions`) with built-in Google Search
+- **Conversation State Management**: Tracks interaction IDs for 24-hour conversation continuity via server-side storage
+- **Tool System**: Modular tools for specialized data sources (Wikipedia, weather, news, disasters)
+- **AI Pipeline**: Two-phase processing - analysis with tools, then compression
 - **Message Pagination**: Splits long responses into multiple 160-character messages
 - **Error Handling**: Comprehensive retry logic and user-visible error messages
 - **Dependency Injection**: Testable architecture with mock-friendly design

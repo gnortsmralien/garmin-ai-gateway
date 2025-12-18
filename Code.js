@@ -4,12 +4,16 @@
 
 const SYSTEM = {
   TRUSTED_EMAILS: ["no.reply.inreach@garmin.com"],
-  MODEL_TAG: "gemini-flash-latest",
+  MODEL_TAG: "gemini-flash-latest",  // Using latest Flash model for Interactions API
   SEARCH_WINDOW: "newer_than:2d",
   SIMULATE_GARMIN: false,  // Production mode - messages sent to Garmin
+  DEBUG_MODE: false,  // Set to true for verbose logging
 
   MAX_RETRIES: 3,
-  ALERT_EMAIL: null
+  ALERT_EMAIL: null,
+
+  // Conversation state settings
+  CONVERSATION_EXPIRY_HOURS: 24  // Auto-start new conversation after this period
 };
 
 const GARMIN = {
@@ -68,8 +72,8 @@ const TOOLBOX_CONFIG = {
   TRIGGERS: {
     // Explicit tool commands (user types these at start of message)
     WIKIPEDIA: /^WIKI\s+(.+)/i,
-    SEARCH: /^(?:SEARCH|GOOGLE|DDG|FIND)\s+(.+)/i,
-    BROWSE: /^(?:URL|BROWSE|FETCH|READ|GET)\s+(.+)/i,
+    // NOTE: SEARCH and URL/BROWSE are now handled automatically by Gemini's
+    // built-in Google Search and URL Context tools - no manual triggers needed
 
     // Auto-triggered based on content + context
     NEWS: {
@@ -133,27 +137,30 @@ RULES:
 - NEVER say "look up", "google", "call", "consult manual online"
 - If you don't know specifics, say so clearly
 - Use METRIC units only: kg, cm, m, km, L, ml, °C, 24hr clock (e.g. 14:00 not 2pm)
-- Use simple formatting 
+- Use simple formatting
+
+YOUR BUILT-IN CAPABILITIES:
+- You can automatically search the web (Google Search) when needed
+- You can automatically fetch and read web pages when URLs are mentioned
+- Use these capabilities proactively to provide accurate, current information
 
 AVAILABLE TOOLS (user can trigger these):
 - WIKI term: Wikipedia lookup (e.g., "WIKI snake bite treatment")
-- SEARCH query: Web search via DuckDuckGo (e.g., "SEARCH trail closures Sierra Nevada")
-- URL link: Fetch webpage content (e.g., "URL https://weather.gov/alerts")
 - NEWS: Top news headlines
 - WEATHER/SUNRISE/DISASTER: Auto-trigger when GPS coordinates are included (via "Send Location" in Garmin)
+- NEW: Start a fresh conversation (resets context)
 
 CRITICAL - NO HALLUCINATION:
-- ONLY use data explicitly provided in TOOL CONTEXT below
+- ONLY use data explicitly provided in TOOL CONTEXT below or from your built-in search/URL capabilities
 - If tool context says "NOT AVAILABLE" or "FAILED", tell user exactly that - do NOT make up data
 - Do NOT invent weather, locations, prices, news, or any factual data
-- If a tool failed, say: "[Tool] unavailable. Try: SEARCH [topic] [location]"
+- For real-time data (weather, news, prices), use your search capability or provided tool data
 - For general knowledge questions without tool data, use your training knowledge
-- For real-time data (weather, news, prices), you MUST have tool data or report failure
 
 Tool results (if any) appear below:
 {{TOOL_CONTEXT}}
 
-OUTPUT: Direct, practical answer. Use ONLY provided tool data for real-time info.`,
+OUTPUT: Direct, practical answer. Use search/URL capabilities and provided tool data for accurate info.`,
     TOKENS: 2048,
     TEMP: 0.4
   },
@@ -183,44 +190,90 @@ OUTPUT: Compressed telegram-style text only.`,
 // =============================    MAIN LOGIC   ===============================
 // =============================================================================
 
+/** Debug logging helper - only logs if DEBUG_MODE is true */
+function debug(msg) {
+  if (SYSTEM.DEBUG_MODE) {
+    console.log(msg);
+  }
+}
+
 function runGateway() {
+  debug('[runGateway] Starting execution...');
+
   const senderQuery = `from:({${SYSTEM.TRUSTED_EMAILS.join(" ")}})`;
   const fullQuery = `${senderQuery} "AI:" ${SYSTEM.SEARCH_WINDOW}`;
 
+  debug(`[runGateway] Search query: ${fullQuery}`);
+
   const threads = GmailApp.search(fullQuery, 0, 10);
+  debug(`[runGateway] Found ${threads.length} threads`);
+
   if (threads.length === 0) return;
 
   // Clean up old retry entries periodically (every 10th run)
   if (Math.random() < 0.1) {
-    cleanupOldRetries();
+    try {
+      cleanupOldRetries();
+      // Also cleanup expired conversation states
+      const stateManager = createInteractionStateManager();
+      stateManager.cleanupExpired();
+    } catch (cleanupError) {
+      console.error(`[runGateway] Cleanup error (non-fatal): ${cleanupError}`);
+    }
   }
 
   // Track processed message IDs in this run to detect retries within same execution
   const processedIds = new Set();
 
-  threads.forEach(thread => {
-    const lastMsg = thread.getMessages().pop();
+  threads.forEach((thread, threadIndex) => {
+    debug(`[runGateway] Processing thread ${threadIndex + 1}/${threads.length}`);
 
-    // Skip if already successfully processed (starred = done)
-    if (lastMsg.isStarred()) return;
+    try {
+      const messages = thread.getMessages();
+      debug(`[runGateway] Thread has ${messages.length} messages`);
 
-    const messageId = lastMsg.getId();
+      const lastMsg = messages[messages.length - 1];
+      if (!lastMsg) {
+        debug(`[runGateway] No last message found, skipping`);
+        return;
+      }
 
-    // Skip if we've already processed this message in this run
-    if (processedIds.has(messageId)) return;
-    processedIds.add(messageId);
+      // Skip if already successfully processed (starred = done)
+      const isStarred = lastMsg.isStarred();
+      debug(`[runGateway] Message starred: ${isStarred}`);
+      if (isStarred) return;
 
-    // Check retry count before processing
-    const retryCount = getRetryCount(messageId);
-    if (retryCount >= RETRY.MAX_ATTEMPTS) {
-      console.log(`[SKIP] Message ${messageId.substring(0, 8)} exceeded max retries (${retryCount})`);
-      lastMsg.star();
-      clearRetryCount(messageId);
-      return;
-    }
+      const messageId = lastMsg.getId();
+      debug(`[runGateway] Message ID: ${messageId.substring(0, 8)}...`);
 
-    const body = lastMsg.getPlainBody();
-    const linkMatch = body.match(/(https:\/\/[a-z0-9\.-]*explore\.garmin\.com\/textmessage\/txtmsg\?[^"\s\n]+)/i);
+      // Skip if we've already processed this message in this run
+      if (processedIds.has(messageId)) {
+        debug(`[runGateway] Message already processed in this run, skipping`);
+        return;
+      }
+      processedIds.add(messageId);
+      debug(`[runGateway] Added to processed IDs`);
+
+      // Check retry count before processing
+      debug(`[runGateway] Checking retry count...`);
+      const retryCount = getRetryCount(messageId);
+      debug(`[runGateway] Retry count: ${retryCount}`);
+
+      if (retryCount >= RETRY.MAX_ATTEMPTS) {
+        console.log(`[SKIP] Message ${messageId.substring(0, 8)} exceeded max retries (${retryCount})`);
+        lastMsg.star();
+        clearRetryCount(messageId);
+        return;
+      }
+
+      debug(`[runGateway] Getting message body...`);
+      const body = lastMsg.getPlainBody();
+      debug(`[runGateway] Body length: ${body.length}`);
+
+      debug(`[runGateway] Matching Garmin link...`);
+      // Support both explore.garmin.com and inreachlink.com formats
+      const linkMatch = body.match(/(https:\/\/(?:[a-z0-9\.-]*explore\.garmin\.com\/textmessage\/txtmsg\?[^"\s\n]+|inreachlink\.com\/[^"\s\n]+))/i);
+      debug(`[runGateway] Link match: ${linkMatch ? 'found' : 'not found'}`);
 
     if (!linkMatch) {
       lastMsg.star();
@@ -228,7 +281,86 @@ function runGateway() {
       return;
     }
 
-    const targetUrl = linkMatch[1];
+    let targetUrl = linkMatch[1];
+    let extractedReplyAddress = null;
+
+    // Extract the recipient address (To: field) - this is the Gmail address that received the email
+    // This will be used as the ReplyAddress in the POST request to Garmin
+    try {
+      const to = lastMsg.getTo();
+      debug(`[runGateway] Email To address: ${to}`);
+      if (to) {
+        // Extract just the email address if it's in format "Name <email@domain.com>"
+        const emailMatch = to.match(/<?([^<>\s]+@[^<>\s]+)>?/);
+        if (emailMatch) {
+          extractedReplyAddress = emailMatch[1].trim();
+          debug(`[runGateway] Extracted recipient address: ${extractedReplyAddress}`);
+        }
+      }
+    } catch (e) {
+      console.error(`[runGateway] Error extracting recipient address: ${e}`);
+    }
+
+    // If it's an inreachlink.com short URL, follow redirect chain manually
+    if (targetUrl.indexOf('inreachlink.com') !== -1) {
+      debug(`[runGateway] Processing inreachlink.com short URL...`);
+      try {
+        // Follow redirects manually to capture the final URL
+        let currentUrl = targetUrl;
+        let redirectCount = 0;
+        let maxRedirects = 5;
+        let finalExtId = null;
+
+        while (redirectCount < maxRedirects) {
+          debug(`[runGateway] Redirect ${redirectCount}: ${currentUrl}`);
+
+          const response = UrlFetchApp.fetch(currentUrl, {
+            followRedirects: false,
+            muteHttpExceptions: true
+          });
+
+          const statusCode = response.getResponseCode();
+          debug(`[runGateway] Status code: ${statusCode}`);
+
+          // Check for redirect (3xx status codes)
+          if (statusCode >= 300 && statusCode < 400) {
+            const location = response.getHeaders()['Location'] || response.getHeaders()['location'];
+            if (location) {
+              debug(`[runGateway] Redirecting to: ${location.substring(0, 150)}...`);
+              currentUrl = location;
+
+              // Check if this is the explore.garmin.com URL with extId
+              if (location.indexOf('explore.garmin.com') !== -1) {
+                const extIdMatch = location.match(/extId=([^&\s]+)/);
+                if (extIdMatch) {
+                  finalExtId = extIdMatch[1];
+                  debug(`[runGateway] Found extId in redirect: ${finalExtId}`);
+                  targetUrl = location;
+                  break;
+                }
+              }
+              redirectCount++;
+            } else {
+              debug(`[runGateway] No Location header, stopping redirect chain`);
+              break;
+            }
+          } else {
+            debug(`[runGateway] Non-redirect status, stopping redirect chain`);
+            break;
+          }
+        }
+
+        // Add adr parameter if we have the recipient address and URL doesn't have it
+        if (finalExtId && extractedReplyAddress && targetUrl.indexOf('adr=') === -1) {
+          targetUrl = targetUrl + '&adr=' + encodeURIComponent(extractedReplyAddress);
+          debug(`[runGateway] Added adr parameter to URL`);
+        }
+
+        debug(`[runGateway] Final URL: ${targetUrl.substring(0, 150)}...`);
+      } catch (e) {
+        console.error(`[runGateway] Error processing short URL: ${e}`);
+      }
+    }
 
     const rawPrompt = body.split('\n')[0].trim();
 
@@ -305,6 +437,10 @@ function runGateway() {
         console.error(`[${logId}] Exception will retry (${newRetryCount}/${RETRY.MAX_ATTEMPTS})`);
       }
     }
+    } catch (threadError) {
+      console.error(`[runGateway] Error processing thread: ${threadError}`);
+      console.error(`[runGateway] Error stack: ${threadError.stack}`);
+    }
   });
 }
 
@@ -317,6 +453,18 @@ function processAndSend(userPrompt, targetUrl, logId, coords) {
   if (!key) {
     sendErrorToUser(targetUrl, "ERR:NO_AI_KEY", "System config error. Contact admin.");
     return { success: false, reason: "NO_API_KEY" };
+  }
+
+  // Initialize interaction state manager
+  let stateManager = null;
+  let senderKey = null;
+  try {
+    stateManager = createInteractionStateManager();
+    senderKey = extractSenderKey(targetUrl);
+    console.log(`[${logId}] Sender key: ${senderKey}`);
+  } catch (stateError) {
+    console.error(`[${logId}] State manager init error (non-fatal): ${stateError}`);
+    // Continue without conversation state if there's an error
   }
 
   // Check for HELP command (before size extraction to allow "HELP SIZE 600")
@@ -356,16 +504,34 @@ function processAndSend(userPrompt, targetUrl, logId, coords) {
     console.log(`[${logId}] Toolbox errors: ${toolboxResult.errors.join(", ")}`);
   }
 
-  console.log(`[${logId}] Phase 1: Analyzing...`);
+  console.log(`[${logId}] Phase 1: Analyzing with Interactions API...`);
+
+  // Get previous interaction ID for conversation continuity
+  let previousInteractionId = null;
+  if (stateManager && senderKey) {
+    try {
+      previousInteractionId = stateManager.getInteractionId(senderKey, userPrompt);
+    } catch (stateError) {
+      console.error(`[${logId}] Error getting interaction ID: ${stateError}`);
+    }
+  }
+
+  // Prepare prompt with tool context
   const promptWithContext = AI_CONFIG.PHASE_1_ANALYZE.PROMPT
     .replace("{{TOOL_CONTEXT}}", toolboxResult.context || "(No additional context)");
 
-  const analysisResult = callGemini(
-    key,
+  // Create Interactions API client with Google Search and URL Context enabled
+  const geminiClient = createGeminiInteractionsClient(key, SYSTEM.MODEL_TAG);
+
+  const analysisResult = geminiClient.call(
     userPrompt,
     promptWithContext,
-    AI_CONFIG.PHASE_1_ANALYZE.TOKENS,
-    AI_CONFIG.PHASE_1_ANALYZE.TEMP
+    {
+      maxOutputTokens: AI_CONFIG.PHASE_1_ANALYZE.TOKENS,
+      temperature: AI_CONFIG.PHASE_1_ANALYZE.TEMP,
+      previousInteractionId: previousInteractionId,
+      tools: ['google_search', 'url_context']  // Enable built-in tools
+    }
   );
 
   if (!analysisResult.success) {
@@ -383,6 +549,15 @@ function processAndSend(userPrompt, targetUrl, logId, coords) {
     }
   }
 
+  // Store interaction ID for next conversation turn
+  if (analysisResult.interactionId && stateManager && senderKey) {
+    try {
+      stateManager.setInteractionId(senderKey, analysisResult.interactionId);
+    } catch (stateError) {
+      console.error(`[${logId}] Error storing interaction ID: ${stateError}`);
+    }
+  }
+
   const analysis = analysisResult.text;
   console.log(`[${logId}] Phase 1 output: ${analysis.length} chars`);
 
@@ -392,12 +567,16 @@ function processAndSend(userPrompt, targetUrl, logId, coords) {
     .replace("{{TARGET}}", targetLength)
     .replace("{{MAX}}", absoluteMax);
 
-  const compressResult = callGemini(
-    key,
+  // Phase 2 uses standard client without tools or conversation state
+  const compressResult = geminiClient.call(
     analysis,
     compressPrompt,
-    AI_CONFIG.PHASE_2_COMPRESS.TOKENS,
-    AI_CONFIG.PHASE_2_COMPRESS.TEMP
+    {
+      maxOutputTokens: AI_CONFIG.PHASE_2_COMPRESS.TOKENS,
+      temperature: AI_CONFIG.PHASE_2_COMPRESS.TEMP,
+      previousInteractionId: null,  // No conversation state for compression
+      tools: []  // No tools needed for compression
+    }
   );
 
   let compressed;
@@ -463,54 +642,8 @@ function runToolbox(userPrompt, coords, logId) {
     }
   }
 
-  // 1b. WEB SEARCH - Using refactored tool and centralized triggers
-  const searchMatch = userPrompt.match(TOOLBOX_CONFIG.TRIGGERS.SEARCH);
-  if (searchMatch) {
-    const query = searchMatch[1].trim();
-    console.log(`[${logId}] TOOLBOX: Triggered SEARCH for "${query}"`);
-    try {
-      const searchTool = createSearchTool();
-      const searchResult = searchTool.fetch(query, logId);
-      if (searchResult.success) {
-        contextParts.push(`[SEARCH RESULTS: ${query}]\n${searchResult.data}`);
-      } else {
-        result.errors.push(`SEARCH:${searchResult.error}`);
-        contextParts.push(`[SEARCH: ${query}] NOT AVAILABLE - ${searchResult.error}`);
-      }
-    } catch (e) {
-      console.error(`[${logId}] TOOLBOX: Search tool error: ${e}`);
-      result.errors.push(`SEARCH:Tool initialization failed`);
-      contextParts.push(`[SEARCH: ${query}] NOT AVAILABLE - Tool error`);
-    }
-  }
-
-  // 1c. WEB BROWSE - Using refactored tool and centralized triggers
-  const browseMatch = userPrompt.match(TOOLBOX_CONFIG.TRIGGERS.BROWSE);
-  if (browseMatch) {
-    let url = browseMatch[1].trim();
-
-    // Auto-add https:// if no protocol specified
-    if (!url.match(/^https?:\/\//i)) {
-      url = 'https://' + url;
-      console.log(`[${logId}] TOOLBOX: Auto-added https:// to URL`);
-    }
-
-    console.log(`[${logId}] TOOLBOX: Triggered BROWSE for "${url}"`);
-    try {
-      const browseTool = createBrowseTool();
-      const browseResult = browseTool.fetch(url, logId);
-      if (browseResult.success) {
-        contextParts.push(`[WEB PAGE: ${url}]\n${browseResult.data}`);
-      } else {
-        result.errors.push(`BROWSE:${browseResult.error}`);
-        contextParts.push(`[WEB PAGE: ${url}] NOT AVAILABLE - ${browseResult.error}`);
-      }
-    } catch (e) {
-      console.error(`[${logId}] TOOLBOX: Browse tool error: ${e}`);
-      result.errors.push(`BROWSE:Tool initialization failed`);
-      contextParts.push(`[WEB PAGE: ${url}] NOT AVAILABLE - Tool error`);
-    }
-  }
+  // NOTE: SEARCH and BROWSE/URL tools are now handled automatically by Gemini's
+  // built-in Google Search and URL Context capabilities - no manual triggers needed
 
 
   // 3. NEWS - Using refactored tool and centralized triggers
@@ -855,6 +988,80 @@ function findSplitPoint(text, limit) {
 // ============================  GARMIN POSTING  ===============================
 // =============================================================================
 
+/**
+ * Extract form values from Garmin page HTML
+ * The page contains hidden form fields with the actual Guid, MessageId, and ReplyAddress
+ *
+ * @param {string} pageUrl - URL of the Garmin message page
+ * @returns {Object|null} - {guid, messageId, replyAddress} or null if extraction fails
+ */
+function extractGarminFormValues(pageUrl) {
+  try {
+    debug(`[Garmin] Fetching page to extract form values...`);
+
+    const response = UrlFetchApp.fetch(pageUrl, {
+      method: 'get',
+      headers: {
+        'User-Agent': GARMIN.USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml'
+      },
+      muteHttpExceptions: true,
+      followRedirects: true
+    });
+
+    const statusCode = response.getResponseCode();
+    if (statusCode !== 200) {
+      console.error(`[Garmin] Page fetch failed with status ${statusCode}`);
+      return null;
+    }
+
+    const html = response.getContentText();
+    debug(`[Garmin] Page fetched, ${html.length} chars`);
+
+    // Extract Guid from hidden input: <input id="Guid" name="Guid" type="hidden" value="..." />
+    const guidMatch = html.match(/name="Guid"[^>]*value="([^"]+)"/i) ||
+                      html.match(/id="Guid"[^>]*value="([^"]+)"/i) ||
+                      html.match(/value="([^"]+)"[^>]*name="Guid"/i);
+
+    // Extract MessageId from hidden input: <input id="MessageId" name="MessageId" type="hidden" value="..." />
+    const messageIdMatch = html.match(/name="MessageId"[^>]*value="([^"]+)"/i) ||
+                           html.match(/id="MessageId"[^>]*value="([^"]+)"/i) ||
+                           html.match(/value="([^"]+)"[^>]*name="MessageId"/i);
+
+    // Extract ReplyAddress from input: <input id="ReplyAddress" ... value="..." />
+    const replyAddressMatch = html.match(/id="ReplyAddress"[^>]*value="([^"]+)"/i) ||
+                              html.match(/name="ReplyAddress"[^>]*value="([^"]+)"/i);
+
+    if (!guidMatch) {
+      console.error(`[Garmin] Could not extract Guid from page`);
+      // Log a snippet of HTML around where Guid should be for debugging
+      const guidIndex = html.indexOf('Guid');
+      if (guidIndex > -1) {
+        console.log(`[Garmin] HTML near 'Guid': ${html.substring(Math.max(0, guidIndex - 50), guidIndex + 200)}`);
+      }
+      return null;
+    }
+
+    if (!messageIdMatch) {
+      console.error(`[Garmin] Could not extract MessageId from page`);
+      return null;
+    }
+
+    const result = {
+      guid: guidMatch[1],
+      messageId: messageIdMatch[1],
+      replyAddress: replyAddressMatch ? replyAddressMatch[1] : null
+    };
+
+    debug(`[Garmin] Extracted - Guid: ${result.guid}, MessageId: ${result.messageId}, ReplyAddress: ${result.replyAddress || 'not found'}`);
+
+    return result;
+  } catch (e) {
+    console.error(`[Garmin] Exception fetching page: ${e}`);
+    return null;
+  }
+}
+
 function postToGarmin(url, message) {
   if (SYSTEM.SIMULATE_GARMIN) {
     console.log(`[SIM] POST: "${message}"`);
@@ -862,40 +1069,112 @@ function postToGarmin(url, message) {
   }
 
   try {
-    const extIdMatch = url.match(/extId=([a-zA-Z0-9\-]+)/);
-    const adrMatch = url.match(/adr=([^&\s]+)/);
+    debug(`[Garmin] Processing URL: ${url.substring(0, 150)}...`);
 
-    if (!extIdMatch || !adrMatch) {
-      console.error(`[Garmin] Invalid URL params`);
+    // Extract the page URL (without adr parameter we added)
+    const pageUrl = url.split('&adr=')[0];
+
+    // Fetch the page and extract the actual form values
+    let formValues = extractGarminFormValues(pageUrl);
+
+    if (!formValues) {
+      console.error(`[Garmin] Failed to extract form values from page`);
+
+      // Fallback to old behavior for backwards compatibility
+      debug(`[Garmin] Trying fallback with URL parameters...`);
+      const extIdMatch = url.match(/extId=([a-zA-Z0-9\-_]+)/);
+      const adrMatch = url.match(/adr=([^&\s]+)/);
+
+      if (!extIdMatch || !adrMatch) {
+        console.error(`[Garmin] Fallback failed - missing URL params`);
+        return false;
+      }
+
+      // Use fallback values (may not work with new URL format)
+      formValues = {
+        guid: extIdMatch[1],
+        messageId: String(Math.floor(Date.now() / 1000)),
+        replyAddress: decodeURIComponent(adrMatch[1])
+      };
+      debug(`[Garmin] Using fallback values`);
+    }
+
+    // Get reply address from URL if not extracted from page
+    let replyAddress = formValues.replyAddress;
+    if (!replyAddress) {
+      const adrMatch = url.match(/adr=([^&\s]+)/);
+      if (adrMatch) {
+        replyAddress = decodeURIComponent(adrMatch[1]);
+        debug(`[Garmin] Using ReplyAddress from URL: ${replyAddress}`);
+      }
+    }
+
+    if (!replyAddress) {
+      console.error(`[Garmin] No ReplyAddress available`);
       return false;
     }
 
     const payload = {
-      'Guid': extIdMatch[1],
-      'ReplyAddress': decodeURIComponent(adrMatch[1]),
-      'MessageId': Math.floor(Date.now() / 1000),
+      'Guid': formValues.guid,
+      'ReplyAddress': replyAddress,
+      'MessageId': formValues.messageId,
       'ReplyMessage': message
     };
 
     const domainMatch = url.match(/https:\/\/[^\/]+/);
     const postUrl = domainMatch[0] + GARMIN.ENDPOINT_SUFFIX;
 
+    debug(`[Garmin] Payload: ${JSON.stringify(payload)}`);
+    debug(`[Garmin] POST URL: ${postUrl}`);
+
     const response = UrlFetchApp.fetch(postUrl, {
       method: 'post',
-      payload: payload,
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
       followRedirects: true,
       headers: {
         'User-Agent': GARMIN.USER_AGENT,
-        'Referer': url,
-        'Origin': domainMatch[0]
+        'Accept': '*/*',
+        'Referer': pageUrl,
+        'Origin': domainMatch[0],
+        'X-Requested-With': 'XMLHttpRequest'
       },
       muteHttpExceptions: true
     });
 
+    debug(`[Garmin] Response code: ${response.getResponseCode()}`);
+
     const code = response.getResponseCode();
     if (code !== 200) {
-      console.error(`[Garmin] HTTP ${code}: ${response.getContentText().substring(0, 100)}`);
+      const responseText = response.getContentText();
+      console.error(`[Garmin] HTTP ${code}: ${responseText.substring(0, 200)}`);
+
+      // Try to parse error response for more details
+      try {
+        const errorJson = JSON.parse(responseText);
+        if (errorJson.message) {
+          console.error(`[Garmin] Error message: ${errorJson.message}`);
+        }
+      } catch (e) {
+        // Not JSON, ignore
+      }
+
       return false;
+    }
+
+    // Check for success in response body
+    const responseText = response.getContentText();
+    try {
+      const responseJson = JSON.parse(responseText);
+      if (responseJson.Success === true || responseJson.success === true) {
+        debug(`[Garmin] POST successful`);
+        return true;
+      } else if (responseJson.error === true) {
+        console.error(`[Garmin] API returned error: ${responseJson.message || 'unknown'}`);
+        return false;
+      }
+    } catch (e) {
+      // Not JSON response, but status was 200, consider success
     }
 
     return true;
@@ -909,130 +1188,8 @@ function postToGarmin(url, message) {
 // =============================  AI INTERFACE  ================================
 // =============================================================================
 
-/**
- * Call Gemini API with improved error handling
- * Returns structured result to distinguish retryable vs permanent failures
- *
- * @returns {Object} { success: boolean, text: string, error: { message: string, retryable: boolean } }
- */
-function callGemini(key, inputText, systemPrompt, maxTokens, temperature) {
-  try {
-    const cleanModel = SYSTEM.MODEL_TAG.replace("models/", "");
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${key}`;
-
-    const payload = {
-      contents: [{ parts: [{ text: inputText }] }],
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      generationConfig: {
-        maxOutputTokens: maxTokens,
-        temperature: temperature
-      }
-    };
-
-    const response = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-
-    const json = JSON.parse(response.getContentText());
-
-    if (json.error) {
-      const errorMsg = json.error.message || "Unknown error";
-      console.error(`[Gemini] API Error: ${errorMsg}`);
-
-      // Classify error as retryable or permanent
-      const retryable = isGeminiErrorRetryable(errorMsg);
-
-      return {
-        success: false,
-        text: null,
-        error: {
-          message: errorMsg,
-          retryable: retryable
-        }
-      };
-    }
-
-    const text = json.candidates?.[0]?.content?.parts?.[0]?.text || null;
-
-    if (!text) {
-      return {
-        success: false,
-        text: null,
-        error: {
-          message: "No text in response",
-          retryable: false
-        }
-      };
-    }
-
-    return {
-      success: true,
-      text: text,
-      error: null
-    };
-
-  } catch (e) {
-    console.error(`[Gemini] Exception: ${e}`);
-
-    // Network errors are typically retryable
-    const retryable = e.message && (
-      e.message.indexOf("timeout") !== -1 ||
-      e.message.indexOf("Timeout") !== -1 ||
-      e.message.indexOf("network") !== -1 ||
-      e.message.indexOf("DNS") !== -1
-    );
-
-    return {
-      success: false,
-      text: null,
-      error: {
-        message: `Exception: ${e.message || e}`,
-        retryable: retryable
-      }
-    };
-  }
-}
-
-/**
- * Determine if a Gemini API error is retryable (temporary) or permanent
- *
- * Retryable errors:
- * - "The model is overloaded" - temporary capacity issue
- * - Rate limit errors - temporary throttling
- * - 503 Service Unavailable - temporary outage
- * - 429 Too Many Requests - rate limiting
- *
- * Permanent errors:
- * - Invalid API key
- * - Malformed request
- * - Content policy violations
- */
-function isGeminiErrorRetryable(errorMessage) {
-  if (!errorMessage) return false;
-
-  const msg = errorMessage.toLowerCase();
-
-  // Temporary/retryable errors
-  if (msg.indexOf("overloaded") !== -1) return true;
-  if (msg.indexOf("rate limit") !== -1) return true;
-  if (msg.indexOf("quota") !== -1) return true;
-  if (msg.indexOf("503") !== -1) return true;
-  if (msg.indexOf("429") !== -1) return true;
-  if (msg.indexOf("temporarily unavailable") !== -1) return true;
-  if (msg.indexOf("try again") !== -1) return true;
-
-  // Permanent errors
-  if (msg.indexOf("api key") !== -1) return false;
-  if (msg.indexOf("invalid") !== -1) return false;
-  if (msg.indexOf("permission") !== -1) return false;
-  if (msg.indexOf("forbidden") !== -1) return false;
-
-  // Default: assume permanent for safety
-  return false;
-}
+// NOTE: AI interface moved to GeminiInteractionsClient.gs.js
+// Uses the Interactions API with built-in Google Search and URL Context tools
 
 // =============================================================================
 // =============================    UTILITIES    ===============================
@@ -1197,22 +1354,26 @@ function isHelpCommand(prompt) {
 function getHelpText() {
   return `SAT-COM AI GATEWAY
 
-TOOLS:
+AUTO FEATURES:
+- Web search (automatic)
+- URL reading (automatic)
+- Conversation memory (24hrs)
+
+MANUAL TOOLS:
 WIKI term
-SEARCH query
-URL link
 NEWS
 ADDRESS (needs GPS*)
 WEATHER (needs GPS*)
 SUNRISE/SUNSET (needs GPS*)
 FULL-WEATHER (needs GPS*)
 DISASTERS (needs GPS*)
+NEW (fresh conversation)
 HELP
 SIZE num
 
 *GPS=location enabled
 
-FULL-WEATHER:UV, visibility, pressure, moon phase, hourly forecast, etc
+FULL-WEATHER: UV, visibility, pressure, moon phase, hourly forecast, etc
 
 USAGE: AI: your question
 `;
