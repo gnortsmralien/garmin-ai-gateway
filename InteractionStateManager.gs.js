@@ -178,7 +178,7 @@ function extractSenderKey(targetUrl) {
 
   // Fallback to extId if address not found
   var extIdMatch = targetUrl.match(/extId=([a-zA-Z0-9\-]+)/);
-  return extIdMatch ? extIdMatch[1] : "UNKNOWN";
+  return extIdMatch ? extIdMatch[1] : simpleHash(targetUrl);
 }
 
 /**

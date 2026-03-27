@@ -16,7 +16,7 @@ Coded with Claude.
 - **AI-Powered Responses**: Uses Google Gemini Interactions API for intelligent, context-aware responses optimized for satellite messaging constraints
 - **Automatic Web Search**: Built-in Google Search integration - AI automatically searches the web when needed for current information
 - **Conversation Memory**: Server-side conversation storage maintains context for 24 hours, enabling follow-up questions and multi-turn interactions
-- **Smart Compression**: Two-phase AI processing that first analyzes queries then compresses responses to fit within Garmin's 160-character limit
+- **Smart Compression**: Two-phase AI processing that first analyzes queries then compresses responses to concise satellite-friendly format, automatically paginating across 1-2 messages
 - **Multi-Page Support**: Automatically paginates longer responses across multiple messages
 - **Retry Mechanism**: Built-in retry logic for handling temporary API failures
 
@@ -33,7 +33,7 @@ Users can trigger specialized tools by including keywords in their messages:
 - **`SUNRISE/SUNSET`**: Astronomy data (requires GPS coordinates)
 - **`FULL-WEATHER`**: Comprehensive weather data including UV, pressure, moon phase
 - **`DISASTERS`**: GDACS disaster alerts for nearby area (requires GPS coordinates)
-- **`ADDRESS`**: Reverse geocoding to get location name (requires GPS coordinates)
+- **`WHERE AM I`**: Reverse geocoding to get location name (requires GPS coordinates)
 - **`NEW`**: Start a fresh conversation (resets 24-hour context memory)
 - **`SIZE <number>`**: Override response length (e.g., `SIZE 500` for 500 characters)
 - **`HELP`**: Display available commands

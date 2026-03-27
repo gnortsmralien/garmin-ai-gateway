@@ -9,7 +9,6 @@ const SYSTEM = {
   SIMULATE_GARMIN: false,  // Production mode - messages sent to Garmin
   DEBUG_MODE: false,  // Set to true for verbose logging
 
-  MAX_RETRIES: 3,
   ALERT_EMAIL: null,
 
   // Conversation state settings
@@ -23,8 +22,8 @@ const GARMIN = {
 
 const LIMITS = {
   GARMIN_SAFE_MAX: 155,
-  AI_TARGET_LENGTH: 150,
-  AI_ABSOLUTE_MAX: 450,
+  AI_TARGET_LENGTH: 250,
+  AI_ABSOLUTE_MAX: 600,
   CHUNK_PAYLOAD: 149,
   MAX_PAGES: 10,
   PAGE_DELAY_MS: 5000
@@ -91,18 +90,6 @@ const TOOLBOX_CONFIG = {
     MIN_ALERT_LEVEL: "Orange"
   },
 
-  // DuckDuckGo Search (HTML scraping - no API key needed)
-  DUCKDUCKGO: {
-    HTML_URL: "https://html.duckduckgo.com/html/",
-    MAX_RESULTS: 5
-  },
-
-  // Web Browse/Fetch
-  WEB_BROWSE: {
-    MAX_CONTENT_CHARS: 2000,
-    TIMEOUT_MS: 15000
-  },
-
   // =============================================================================
   // TOOL TRIGGER KEYWORDS
   // These keywords determine when each tool is automatically activated
@@ -130,7 +117,7 @@ const TOOLBOX_CONFIG = {
     },
 
     ASTRONOMY: {
-      keywords: ["SUNRISE", "SUNSET", "MOON", "LIGHT", "DAYLIGHT", "DARK", "NIGHT", "SUN"],
+      keywords: ["SUNRISE", "SUNSET", "MOON", "MOONRISE", "MOONSET", "DAYLIGHT"],
       requiresCoords: true
     },
 
@@ -141,13 +128,13 @@ const TOOLBOX_CONFIG = {
     },
 
     DISASTERS: {
-      keywords: ["DISASTERS", "DISASTER", "EARTHQUAKE", "FLOOD", "CYCLONE", "TSUNAMI", "VOLCANO", "ALERT", "EMERGENCY"],
+      keywords: ["DISASTERS", "DISASTER", "EARTHQUAKE", "CYCLONE", "TSUNAMI", "VOLCANO", "GDACS"],
       requiresCoords: true
     },
 
     REVERSE_GEOCODE: {
       // User must explicitly request location name lookup
-      keywords: ["ADDRESS", "PLACE", "WHERE", "WHEREAM I", "WHERE AM I"],
+      keywords: ["WHERE AM I", "WHEREAM I", "MY LOCATION", "LOCATION NAME", "WHAT PLACE IS THIS"],
       requiresCoords: true
     }
   }
@@ -210,18 +197,18 @@ OUTPUT: Direct, practical answer. Use search/URL capabilities and provided tool 
 TARGET: {{TARGET}} chars. MAX: {{MAX}} chars.
 
 STYLE:
-- Abbreviate aggressively: u, ur, w/, b4, bc, approx, temp, qty, hr, min, filt, eng, chk, amt, prob, req, immed, evac
+- Preserve important details, quantities, and safety warnings
+- Abbreviate where clear: approx, temp, qty, hr, min, filt, eng, chk, amt, prob, req, immed, evac, w/
 - Numbers not words: "500ml" not "five hundred ml"
 - Slashes for alternatives: "chk/replace", "walk/crawl"
 - Drop articles (a, an, the), drop "you should"
 - No formatting symbols ** or ##
-- Minimize spaces
 - Use category labels if multiple topics: IMMED: H2O: SIGNAL: SHELTER: etc
 - METRIC units only: kg, cm, m, km, L, ml, °C, 24hr clock
 
 OUTPUT: Compressed telegram-style text only.`,
     TOKENS: 1024,
-    TEMP: 0.1
+    TEMP: 0.2
   }
 };
 
@@ -1322,7 +1309,7 @@ function cleanOutput(text) {
     .replace(/`/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^\s+|\s+$/g, "")
-    .replace(/\s{2,}/g, " ");
+    .replace(/ {2,}/g, " ");
 }
 
 function truncateSmart(text, limit) {
@@ -1401,7 +1388,7 @@ AUTO FEATURES:
 MANUAL TOOLS:
 WIKI term
 NEWS
-ADDRESS (needs GPS*)
+WHERE AM I (needs GPS*)
 WEATHER (needs GPS*)
 SUNRISE/SUNSET (needs GPS*)
 FULL-WEATHER (needs GPS*)
