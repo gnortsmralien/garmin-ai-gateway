@@ -164,7 +164,7 @@ GeminiInteractionsClient.prototype.buildPayload = function(userMessage, systemPr
   var payload = {
     model: this.config.modelTag,
     input: inputText,
-    response_modalities: ["TEXT"],
+    response_modalities: ["text"],
     generation_config: {
       max_output_tokens: options.maxOutputTokens || 2048,
       temperature: options.temperature !== undefined ? options.temperature : 0.4
