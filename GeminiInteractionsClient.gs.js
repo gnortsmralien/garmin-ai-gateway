@@ -96,6 +96,12 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
 
     if (!text) {
       console.error(`[GeminiInteractions] No text in response. Status: ${json.status}, Keys: ${Object.keys(json).join(', ')}`);
+      // Dump the steps shape so an unexpected structure is debuggable.
+      try {
+        console.error(`[GeminiInteractions] Raw steps: ${JSON.stringify(json.steps).substring(0, 1500)}`);
+      } catch (dumpErr) {
+        console.error(`[GeminiInteractions] Could not stringify steps: ${dumpErr}`);
+      }
       return {
         success: false,
         text: null,
@@ -209,8 +215,113 @@ GeminiInteractionsClient.prototype.buildPayload = function(userMessage, systemPr
  * Response format: { id, outputs: [{ type: "text", text: "..." }], status }
  * @private
  */
+GeminiInteractionsClient.prototype.extractStepText = function(step) {
+  if (!step || typeof step !== "object") return null;
+
+  // Skip pure tool-call / tool-result steps that don't carry model prose.
+  // We still try to read content fields below in case text rides alongside.
+
+  // 1) Direct text field on the step
+  if (typeof step.text === "string" && step.text.trim()) {
+    return step.text;
+  }
+
+  // 2) content as a plain string
+  if (typeof step.content === "string" && step.content.trim()) {
+    return step.content;
+  }
+
+  // 3) content.parts[].text  (generateContent-style nested in a step)
+  if (step.content && step.content.parts && step.content.parts.length) {
+    var parts = this.collectPartsText(step.content.parts);
+    if (parts) return parts;
+  }
+
+  // 4) content as an array of parts/blocks: [{ text }] or [{ type:"text", text }]
+  if (Array.isArray(step.content)) {
+    var arrText = this.collectPartsText(step.content);
+    if (arrText) return arrText;
+  }
+
+  // 5) message.content (chat-style)
+  if (step.message) {
+    if (typeof step.message.content === "string" && step.message.content.trim()) {
+      return step.message.content;
+    }
+    if (Array.isArray(step.message.content)) {
+      var msgText = this.collectPartsText(step.message.content);
+      if (msgText) return msgText;
+    }
+  }
+
+  // 6) parts[] directly on the step
+  if (step.parts && step.parts.length) {
+    var stepParts = this.collectPartsText(step.parts);
+    if (stepParts) return stepParts;
+  }
+
+  // 7) output.text / output as nested object
+  if (step.output) {
+    if (typeof step.output.text === "string" && step.output.text.trim()) {
+      return step.output.text;
+    }
+    if (typeof step.output === "string" && step.output.trim()) {
+      return step.output;
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Join text from an array of part/block objects, tolerating both
+ * { text } and { type: "text", text } shapes.
+ * @private
+ */
+GeminiInteractionsClient.prototype.collectPartsText = function(parts) {
+  if (!parts || !parts.length) return null;
+  var texts = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (typeof p === "string") {
+      if (p.trim()) texts.push(p);
+    } else if (p && typeof p.text === "string" && p.text.trim()) {
+      texts.push(p.text);
+    } else if (p && typeof p.content === "string" && p.content.trim()) {
+      texts.push(p.content);
+    }
+  }
+  return texts.length ? texts.join("\n\n") : null;
+};
+
+/**
+ * Extract text from Interactions API response
+ * Response format: { id, steps: [...], status, ... }
+ * @private
+ */
 GeminiInteractionsClient.prototype.extractText = function(json) {
-  // Interactions API format: outputs array with type and text
+  // Interactions API format: steps array. The final model answer is a step
+  // whose content carries the text. Tool steps (google_search, etc.) are
+  // interleaved, so we only collect text from message/model-style steps and
+  // take the LAST one (the final answer after any tool use).
+  if (json.steps && json.steps.length > 0) {
+    var stepTexts = [];
+
+    for (var s = 0; s < json.steps.length; s++) {
+      var step = json.steps[s];
+      var stepText = this.extractStepText(step);
+      if (stepText) {
+        stepTexts.push(stepText);
+      }
+    }
+
+    if (stepTexts.length > 0) {
+      // Last text-bearing step is the final answer.
+      return stepTexts[stepTexts.length - 1];
+    }
+  }
+
+  // Interactions API (older) format: outputs array with type and text
   if (json.outputs && json.outputs.length > 0) {
     var textParts = [];
 
