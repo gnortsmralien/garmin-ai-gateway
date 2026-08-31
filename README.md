@@ -16,9 +16,9 @@ Coded with Claude.
 - **AI-Powered Responses**: Uses Google Gemini Interactions API for intelligent, context-aware responses optimized for satellite messaging constraints
 - **Automatic Web Search**: Built-in Google Search integration - AI automatically searches the web when needed for current information
 - **Conversation Memory**: Server-side conversation storage maintains context for 24 hours, enabling follow-up questions and multi-turn interactions
-- **Smart Compression**: Two-phase AI processing that first analyzes queries then compresses responses to concise satellite-friendly format, automatically paginating across 1-2 messages
-- **Multi-Page Support**: Automatically paginates longer responses across multiple messages
-- **Retry Mechanism**: Built-in retry logic for handling temporary API failures
+- **Readable Brevity**: Replies are written to a character budget (350 target, 700 hard maximum) in plain English rather than compressed into telegram-style abbreviations. A second shrink pass runs only when an answer overshoots the budget, and it is instructed to keep every safety warning, dose and quantity
+- **Resumable Pagination**: Long replies are split into pages that always fit the device limit, prefixed `1/4`, `2/4`, and delivered in order. Progress is checkpointed after each page, so a run interrupted by the Apps Script 6-minute limit or a transient Garmin failure resumes at the next unsent page instead of replaying the whole reply
+- **Retry Mechanism**: Per-page delivery retries plus message-level retry logic for temporary API failures
 
 ### Automatic Features (No Keywords Needed)
 - **Web Search**: AI automatically searches Google when it needs current information
@@ -34,8 +34,8 @@ Users can trigger specialized tools by including keywords in their messages:
 - **`FULL-WEATHER`**: Comprehensive weather data including UV, pressure, moon phase
 - **`DISASTERS`**: GDACS disaster alerts for nearby area (requires GPS coordinates)
 - **`WHERE AM I`**: Reverse geocoding to get location name (requires GPS coordinates)
-- **`NEW`**: Start a fresh conversation (resets 24-hour context memory)
-- **`SIZE <number>`**: Override response length (e.g., `SIZE 500` for 500 characters)
+- **`NEW:`**: Start a fresh conversation, resetting the 24-hour context memory. Use it alone (`NEW`) or as a prefix followed by punctuation (`NEW: how do I splint a wrist`). The punctuation is required so that ordinary questions beginning with the word "new" do not silently discard your conversation
+- **`SIZE <number>`**: Override response length (e.g., `SIZE 500` for 500 characters, capped at 2000)
 - **`HELP`**: Display available commands
 
 ## Installation
@@ -54,19 +54,31 @@ Users can trigger specialized tools by including keywords in their messages:
    - Name your project (e.g., "Garmin AI Gateway")
 
 2. **Add the source files**
-   - Copy all `.js` and `.gs.js` files from this repository
-   - In the Apps Script editor, create new script files for each:
-     - `Code.js` (main file - this is already created by default)
-     - `GeminiInteractionsClient.gs.js` (NEW - Interactions API client)
-     - `InteractionStateManager.gs.js` (NEW - conversation state management)
-     - `HttpClient.gs.js`
-     - `WikipediaTool.gs.js`
-     - `WeatherTool.gs.js`
-     - `NewsTool.gs.js`
-     - `GdacsTool.gs.js`
-     - `ReverseGeocodeTool.gs.js`
-     - (Note: SearchTool.gs.js and BrowseTool.gs.js are no longer needed - replaced by built-in tools)
-     - (Add test files if you want to run tests)
+
+   The simplest route is `npm run push`, which uses `clasp` and the `.claspignore`
+   whitelist to upload exactly the right set of files. To do it by hand, create a
+   script file in the Apps Script editor for each of:
+
+   | File | Responsibility |
+   | --- | --- |
+   | `Code.js` | Entry point `runGateway()` and the request pipeline |
+   | `Config.gs.js` | All tunables, limits and AI prompts |
+   | `MessageParser.gs.js` | Parsing inbound Garmin notification emails |
+   | `Toolbox.gs.js` | Tool triggers and TOOL CONTEXT assembly |
+   | `Pager.gs.js` | Page splitting, ordered delivery, resume state |
+   | `GarminClient.gs.js` | Garmin reply-page parsing and POSTs |
+   | `Utils.gs.js` | Text shaping, retry bookkeeping, alerting |
+   | `GeminiInteractionsClient.gs.js` | Interactions API client |
+   | `InteractionStateManager.gs.js` | Conversation continuity |
+   | `HttpClient.gs.js` | Injectable HTTP layer used by the tools |
+   | `WikipediaTool.gs.js` etc. | Individual data-source tools |
+
+   Test files (`*.test.gs.js`, `TestRunner.gs.js`, `IntegrationTests.gs.js`) are
+   optional in the editor but are pushed by default so `runAllTests()` can be run
+   from the Apps Script UI.
+
+   (SearchTool.gs.js and BrowseTool.gs.js are gone - the Interactions API's
+   built-in Google Search and URL Context tools replaced them.)
 
 3. **Configure the manifest**
    - Click on Project Settings (gear icon)
@@ -114,25 +126,61 @@ Examples:
 - `AI: NEWS` (manual news tool)
 - `AI: How do I purify water in the wilderness?` (general knowledge + automatic search if needed)
 - `AI: SIZE 300 Explain how to build a shelter` (override response length)
-- `AI: NEW What's the capital of France?` (start fresh conversation, forget previous context)
+- `AI: NEW: What's the capital of France?` (start fresh conversation, forget previous context)
 
 ### GPS-Based Features
 To use location-based tools (weather, astronomy, disasters, address), enable "Send Location" in your InReach message settings. The gateway will automatically extract coordinates from the message.
 
 ## Configuration
 
-Key settings can be modified in `Code.js`:
+Everything tunable lives in `Config.gs.js`.
 
 ```javascript
 const SYSTEM = {
   TRUSTED_EMAILS: ["no.reply.inreach@garmin.com"],  // Emails to accept messages from
   MODEL_TAG: "gemini-flash-latest",                  // Gemini model for Interactions API
   SEARCH_WINDOW: "newer_than:2d",                    // Gmail search window
-  MAX_RETRIES: 3,                                    // Retry attempts for failures
+  SIMULATE_GARMIN: false,                            // true = log replies instead of sending
+  DEBUG_MODE: false,                                 // Verbose logging
   ALERT_EMAIL: null,                                 // Optional admin alert email
-  CONVERSATION_EXPIRY_HOURS: 24                      // Auto-start new conversation after this period
+  CONVERSATION_EXPIRY_HOURS: 24,                     // Auto-start new conversation after this period
+  MAX_THREADS_PER_RUN: 10,                           // Gmail threads inspected per execution
+  EXECUTION_BUDGET_MS: 4.5 * 60 * 1000               // Stop before the 6-minute Apps Script kill
 };
 ```
+
+### Response length and message quota
+
+This is the setting to think about, because every page costs one satellite
+message off your InReach plan.
+
+```javascript
+const LIMITS = {
+  GARMIN_SAFE_MAX: 155,   // Per-message ceiling, including the "3/7 " prefix
+  AI_TARGET_LENGTH: 350,  // What the model aims for  (~2-3 pages)
+  AI_ABSOLUTE_MAX: 700,   // Hard ceiling             (~5 pages)
+  SIZE_OVERRIDE_MAX: 2000,// Ceiling for an explicit "SIZE n"
+  MAX_PAGES: 16,          // Safety valve
+  PAGE_DELAY_MS: 5000     // Pacing between pages
+};
+```
+
+Raising `AI_TARGET_LENGTH` and `AI_ABSOLUTE_MAX` buys more detail at a
+proportional cost in messages. A single `SIZE n` in a message overrides both for
+that reply only.
+
+### How a reply is produced
+
+1. Tools that the message triggers are run, and their output (or an explicit
+   failure note) becomes the TOOL CONTEXT block.
+2. One Interactions API call answers the question. The character budget is part
+   of the prompt, and the prompt explicitly forbids telegram-style abbreviation.
+3. If the answer exceeds `AI_ABSOLUTE_MAX`, a second call shortens it while
+   preserving safety warnings and numbers. Boundary-aware truncation is the last
+   resort, and it marks the cut.
+4. `Pager.gs.js` splits the result into pages that fit `GARMIN_SAFE_MAX`
+   including the page prefix, then sends them in order, checkpointing progress
+   after each one.
 
 ## Testing
 
@@ -154,15 +202,15 @@ npm run lint
 
 ## Architecture
 
-- **Email Processing**: Monitors Gmail for InReach messages and extracts queries
-- **Garmin Reply Handling**: Supports both legacy URLs and new `inreachlink.com` short URLs with automatic form value extraction
-- **Interactions API Client**: Uses Gemini Interactions API (`/v1beta/interactions`) with built-in Google Search
-- **Conversation State Management**: Tracks interaction IDs for 24-hour conversation continuity via server-side storage
-- **Tool System**: Modular tools for specialized data sources (Wikipedia, weather, news, disasters)
-- **AI Pipeline**: Two-phase processing - analysis with tools, then compression
-- **Message Pagination**: Splits long responses into multiple 160-character messages
-- **Error Handling**: Comprehensive retry logic and user-visible error messages
-- **Dependency Injection**: Testable architecture with mock-friendly design
+- **Email Processing** (`MessageParser.gs.js`): Monitors Gmail for InReach messages and extracts the query, the reply link and any GPS coordinates. Gmail hard-wraps the plain-text body, so the message is reassembled across lines rather than read from the first line only
+- **Garmin Reply Handling** (`GarminClient.gs.js`): Supports both legacy URLs and `inreachlink.com` short URLs, with automatic form-value extraction. One session is opened per reply and reused for every page
+- **Interactions API Client** (`GeminiInteractionsClient.gs.js`): Uses the Gemini Interactions API (`/v1beta/interactions`) with built-in Google Search and URL Context. Collects the model's prose after the last tool step, skipping reasoning steps, and detects token-limit truncation
+- **Conversation State** (`InteractionStateManager.gs.js`): Tracks interaction IDs for 24-hour continuity via server-side storage
+- **Tool System** (`Toolbox.gs.js` + `*Tool.gs.js`): Modular tools for specialized data sources (Wikipedia, weather, news, disasters, geocoding)
+- **AI Pipeline** (`Code.js`): A single budgeted call, with a conditional shrink pass on overshoot
+- **Message Pagination** (`Pager.gs.js`): Prefix-aware splitting, ordered delivery, per-page retries and resume-after-interruption
+- **Error Handling**: Message-level retry logic and user-visible error messages on the device
+- **Dependency Injection**: Testable architecture with mock-friendly design; the paging and parsing logic is pure and covered by unit tests
 
 ## Security Considerations
 
@@ -173,10 +221,12 @@ npm run lint
 
 ## Limitations
 
-- Response limited by satellite message constraints (160 chars per page)
+- Response limited by satellite message constraints (155 chars per page, including the page prefix)
+- Every page consumes one message from your InReach plan; see *Response length and message quota*
 - API rate limits apply (Gemini, weather services, etc.)
 - Some tools require GPS coordinates from InReach device
 - Processing runs on schedule (not real-time)
+- Apps Script caps an execution at 6 minutes. Replies that cannot finish in that window checkpoint and resume on the next run, so the final pages may arrive a minute or two later
 
 ## License
 

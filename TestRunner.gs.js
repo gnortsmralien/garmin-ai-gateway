@@ -15,9 +15,23 @@ function runAllTests() {
   console.log("╚════════════════════════════════════════════════════════════╝\n");
 
   var allPassed = true;
-  var totalTests = 0;
-  var totalPassed = 0;
-  var totalFailed = 0;
+
+  // Core pipeline tests
+  var suites = [
+    ["Utilities & Conversation State", runUtilsTests],
+    ["Message Parser", runMessageParserTests],
+    ["Garmin Messenger Client", runGarminClientTests],
+    ["Paging Engine", runPagerTests],
+    ["Toolbox Triggers", runToolboxTests],
+    ["Gemini Interactions Client", runGeminiClientTests]
+  ];
+
+  for (var s = 0; s < suites.length; s++) {
+    console.log("\n┌─────────────────────────────────────────────────────────┐");
+    console.log("│ " + padRight(suites[s][0] + " Tests", 56) + "│");
+    console.log("└─────────────────────────────────────────────────────────┘");
+    if (!suites[s][1]()) allPassed = false;
+  }
 
   // Wikipedia Tool Tests
   console.log("\n┌─────────────────────────────────────────────────────────┐");
@@ -70,6 +84,13 @@ function runAllTests() {
   console.log("\n");
 
   return allPassed;
+}
+
+/** Pad a string to `width` with spaces. @private */
+function padRight(str, width) {
+  var out = String(str);
+  while (out.length < width) out += " ";
+  return out;
 }
 
 /**

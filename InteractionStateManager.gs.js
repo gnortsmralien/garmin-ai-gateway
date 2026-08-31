@@ -93,31 +93,38 @@ InteractionStateManager.prototype.clearInteractionId = function(senderKey) {
 };
 
 /**
- * Check if user wants to start a new conversation
- * Looks for keywords: NEW, RESET, FRESH, START OVER
+ * Check if user wants to start a new conversation.
+ *
+ * Either the whole message is the keyword, or the message opens with the
+ * keyword followed by punctuation: "NEW: how do I splint a wrist".
+ *
+ * A bare prefix is deliberately NOT enough. The old rule matched /^NEW\b/,
+ * so an ordinary question such as "new tent recommendations?" silently threw
+ * away the conversation the user was in the middle of.
  *
  * @param {string} userPrompt - User's message
  * @returns {boolean}
  */
 InteractionStateManager.prototype.isNewConversationRequested = function(userPrompt) {
-  var upperPrompt = userPrompt.toUpperCase().trim();
+  var upperPrompt = String(userPrompt || "").toUpperCase().trim();
 
-  // Exact matches
-  if (upperPrompt === "NEW" ||
-      upperPrompt === "RESET" ||
-      upperPrompt === "FRESH" ||
-      upperPrompt === "START OVER" ||
-      upperPrompt === "NEW CONVERSATION") {
-    return true;
-  }
+  var exact = ["NEW", "RESET", "FRESH", "START OVER", "NEW CONVERSATION", "NEW CHAT"];
+  if (exact.indexOf(upperPrompt) !== -1) return true;
 
-  // Check if starts with these keywords
-  if (upperPrompt.match(/^(NEW|RESET|FRESH)\b/)) {
-    return true;
-  }
-
-  return false;
+  return /^(NEW|RESET|FRESH)\s*[:\-,.!]/.test(upperPrompt);
 };
+
+/**
+ * Remove a leading reset command so it is not sent to the model as part of
+ * the question.
+ *
+ * @param {string} userPrompt
+ * @returns {string}
+ */
+function stripResetPrefix(userPrompt) {
+  if (!userPrompt) return "";
+  return userPrompt.replace(/^(NEW|RESET|FRESH)\s*[:\-,.!]\s*/i, "").trim();
+}
 
 /**
  * Clean up expired conversation states

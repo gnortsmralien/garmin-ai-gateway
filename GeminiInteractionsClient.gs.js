@@ -93,6 +93,11 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
 
     // Extract text from outputs array
     var text = this.extractText(json);
+    var truncated = this.wasTruncated(json);
+
+    if (truncated) {
+      console.error(`[GeminiInteractions] Response hit the output token limit; answer may be incomplete`);
+    }
 
     if (!text) {
       console.error(`[GeminiInteractions] No text in response. Status: ${json.status}, Keys: ${Object.keys(json).join(', ')}`);
@@ -106,9 +111,11 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
         success: false,
         text: null,
         interactionId: interactionId,
+        // A token-limit stop with no prose usually means reasoning consumed the
+        // whole budget - worth another attempt rather than a hard failure.
         error: {
-          message: "No text in response",
-          retryable: false
+          message: truncated ? "Output token limit reached before any text" : "No text in response",
+          retryable: !!truncated
         }
       };
     }
@@ -119,6 +126,7 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
       success: true,
       text: text,
       interactionId: interactionId,
+      truncated: !!truncated,
       error: null
     };
 
@@ -166,16 +174,23 @@ GeminiInteractionsClient.prototype.buildPayload = function(userMessage, systemPr
     inputText = userMessage;
   }
 
-  // Build payload with top-level fields (not nested in config)
+  // Build payload with top-level fields (not nested in config).
+  //
+  // max_output_tokens is deliberately generous: on a thinking model the
+  // reasoning tokens are drawn from the same budget, and a tight cap produces
+  // answers that stop mid-sentence. Reply length is governed by the prompt and
+  // the shrink pass, not by starving the token budget.
   var payload = {
     model: this.config.modelTag,
     input: inputText,
     response_modalities: ["text"],
     generation_config: {
-      max_output_tokens: options.maxOutputTokens || 2048,
+      max_output_tokens: options.maxOutputTokens || 8192,
       temperature: options.temperature !== undefined ? options.temperature : 0.4
     },
-    store: true
+    // Only conversational turns need server-side storage; one-shot passes such
+    // as the shrink call opt out so they do not pollute the interaction chain.
+    store: options.store !== false
   };
 
   // Add previous interaction ID for conversation continuity
@@ -285,13 +300,87 @@ GeminiInteractionsClient.prototype.collectPartsText = function(parts) {
     var p = parts[i];
     if (typeof p === "string") {
       if (p.trim()) texts.push(p);
-    } else if (p && typeof p.text === "string" && p.text.trim()) {
+      continue;
+    }
+    if (!p) continue;
+    // Reasoning parts are not the answer; emitting them is what made replies
+    // read like fragments of someone else's notes.
+    if (p.thought === true || p.type === "thought" || p.type === "thinking") continue;
+
+    if (typeof p.text === "string" && p.text.trim()) {
       texts.push(p.text);
-    } else if (p && typeof p.content === "string" && p.content.trim()) {
+    } else if (typeof p.content === "string" && p.content.trim()) {
       texts.push(p.content);
     }
   }
   return texts.length ? texts.join("\n\n") : null;
+};
+
+/**
+ * Is this step the model's internal reasoning rather than its answer?
+ * @private
+ */
+GeminiInteractionsClient.prototype.isThoughtStep = function(step) {
+  if (!step || typeof step !== "object") return false;
+  if (step.thought === true || step.is_thought === true || step.isThought === true) return true;
+
+  var type = String(step.type || step.kind || step.role || "").toLowerCase();
+  return type.indexOf("thought") !== -1 ||
+         type.indexOf("thinking") !== -1 ||
+         type.indexOf("reasoning") !== -1;
+};
+
+/**
+ * Is this step a tool invocation or tool result rather than model prose?
+ * @private
+ */
+GeminiInteractionsClient.prototype.isToolStep = function(step) {
+  if (!step || typeof step !== "object") return false;
+
+  if (step.tool_call || step.toolCall || step.tool_result || step.toolResult ||
+      step.function_call || step.functionCall || step.function_response || step.functionResponse) {
+    return true;
+  }
+
+  var type = String(step.type || step.kind || "").toLowerCase();
+  return type.indexOf("tool") !== -1 ||
+         type.indexOf("function") !== -1 ||
+         type.indexOf("search") !== -1 ||
+         type.indexOf("url_context") !== -1 ||
+         type.indexOf("code_execution") !== -1;
+};
+
+/**
+ * Did generation stop because it ran out of output tokens?
+ * @private
+ */
+GeminiInteractionsClient.prototype.wasTruncated = function(json) {
+  if (!json) return false;
+
+  var status = String(json.status || "").toLowerCase();
+  if (status.indexOf("incomplete") !== -1 || status.indexOf("max_token") !== -1) return true;
+
+  if (json.incomplete_details && json.incomplete_details.reason) {
+    if (String(json.incomplete_details.reason).toLowerCase().indexOf("max_token") !== -1) return true;
+  }
+
+  var reasons = [];
+  if (json.candidates) {
+    for (var i = 0; i < json.candidates.length; i++) {
+      reasons.push(json.candidates[i].finishReason || json.candidates[i].finish_reason);
+    }
+  }
+  if (json.steps) {
+    for (var s = 0; s < json.steps.length; s++) {
+      reasons.push(json.steps[s].finishReason || json.steps[s].finish_reason);
+    }
+  }
+
+  for (var r = 0; r < reasons.length; r++) {
+    if (reasons[r] && String(reasons[r]).toUpperCase().indexOf("MAX_TOKENS") !== -1) return true;
+  }
+
+  return false;
 };
 
 /**
@@ -300,24 +389,38 @@ GeminiInteractionsClient.prototype.collectPartsText = function(parts) {
  * @private
  */
 GeminiInteractionsClient.prototype.extractText = function(json) {
-  // Interactions API format: steps array. The final model answer is a step
-  // whose content carries the text. Tool steps (google_search, etc.) are
-  // interleaved, so we only collect text from message/model-style steps and
-  // take the LAST one (the final answer after any tool use).
+  // Interactions API format: a steps array in which tool calls, tool results,
+  // reasoning and model prose are interleaved.
+  //
+  // The final answer is everything the model says AFTER the last tool step.
+  // Taking only the single last text-bearing step (the previous behaviour)
+  // silently dropped the rest of a multi-part answer, and could return a
+  // reasoning step instead of the answer.
   if (json.steps && json.steps.length > 0) {
-    var stepTexts = [];
+    var steps = json.steps;
+    var lastToolIdx = -1;
 
-    for (var s = 0; s < json.steps.length; s++) {
-      var step = json.steps[s];
-      var stepText = this.extractStepText(step);
-      if (stepText) {
-        stepTexts.push(stepText);
-      }
+    for (var t = 0; t < steps.length; t++) {
+      if (this.isToolStep(steps[t])) lastToolIdx = t;
     }
 
-    if (stepTexts.length > 0) {
-      // Last text-bearing step is the final answer.
-      return stepTexts[stepTexts.length - 1];
+    var answerParts = [];
+    for (var s = lastToolIdx + 1; s < steps.length; s++) {
+      if (this.isThoughtStep(steps[s])) continue;
+      var stepText = this.extractStepText(steps[s]);
+      if (stepText) answerParts.push(stepText.trim());
+    }
+
+    if (answerParts.length > 0) {
+      return answerParts.join("\n\n");
+    }
+
+    // Nothing after the last tool step: fall back to the last non-reasoning
+    // text anywhere in the trace.
+    for (var f = steps.length - 1; f >= 0; f--) {
+      if (this.isThoughtStep(steps[f])) continue;
+      var fallbackText = this.extractStepText(steps[f]);
+      if (fallbackText) return fallbackText.trim();
     }
   }
 
