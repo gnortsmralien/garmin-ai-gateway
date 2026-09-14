@@ -24,11 +24,18 @@
  *
  * There is deliberately NO "just use the script owner" fallback, convenient as
  * that would be. Session.getEffectiveUser() pulls the userinfo.email scope into
- * a project that needs three scopes without it, and a changed scope set makes
- * Apps Script demand re-authorisation before it will create a trigger or, in
- * the worse case, keep running the existing ones. A gateway whose entire
- * failure history is silent breakage should not take on a new way to break
- * silently in order to save one line of configuration.
+ * a project that needs three scopes without it, and a changed scope set can
+ * make Apps Script demand re-authorisation before it will create a trigger or
+ * keep running the existing ones.
+ *
+ * Honest about the evidence: when this fallback existed, the canary trigger
+ * could not be saved - the dialog's Save silently no-opped six times, and
+ * worked on the first attempt after the call was removed. That is suggestive,
+ * not proof; the Overview scope panel shows the GRANTED set rather than what
+ * the code needs, so it still lists four and the mechanism was never confirmed.
+ * The removal stands on its own merits either way: a project should not ask
+ * for a scope it does not use, least of all one whose entire failure history
+ * is silent breakage, to save a line of configuration.
  *
  * @returns {string|null}
  */

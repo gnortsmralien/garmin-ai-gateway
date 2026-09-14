@@ -245,7 +245,7 @@ address they should reach.
 
 There is deliberately no "just use the script owner" default. Reading the
 owner's address costs the `userinfo.email` OAuth scope, and changing a
-project's scope set makes Apps Script demand re-authorisation before it will
+project's scope set can make Apps Script demand re-authorisation before it will
 create a trigger - or keep running the ones you already have. A gateway whose
 entire failure history is silent breakage should not buy a new way to break
 silently for the sake of one line of configuration.
