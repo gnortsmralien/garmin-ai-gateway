@@ -39,8 +39,14 @@ const GARMIN = {
 
   // Server Action ids are content hashes that change on every Garmin front-end
   // deploy. GarminClient rediscovers the live id from the route's JS chunk on
-  // each session and only uses this pinned value if discovery fails.
-  SEND_REPLY_ACTION_ID: "60e0518dd113775ab471a769fddd3860d84bad10e6",
+  // each session and only uses this pinned value if discovery fails - it is a
+  // last resort, not a source of truth, and is expected to go stale.
+  // Last seen live: 2026-09-14.
+  SEND_REPLY_ACTION_ID: "60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf",
+
+  // Route chunks to fetch while hunting for sendReplyAction. Reply-route
+  // chunks are tried first, so the first probe almost always wins.
+  MAX_CHUNK_PROBES: 3,
 
   // The Messenger composer caps a reply at 160 characters.
   MAX_MESSAGE_CHARS: 160,

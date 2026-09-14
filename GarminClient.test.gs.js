@@ -10,17 +10,28 @@
 function runGarminClientTests() {
   var runner = new TestRunner();
 
-  // A trimmed copy of the real Garmin Messenger reply page markup.
+  // A trimmed copy of the real Garmin Messenger reply page markup, captured
+  // 2026-09-14. The route chunk is NOT a <script src> - it appears only inside
+  // the RSC flight payload, as a path relative to the build's asset root with
+  // no /web/_next/ prefix. An extractor that insists on the absolute form finds
+  // nothing here, which is how delivery broke while these tests stayed green.
   var MESSENGER_HTML = [
     '<!DOCTYPE html><html><head><title>Garmin Messenger</title>',
-    '<script src="/web/_next/static/chunks/493-b123362a0b052b35.js" async=""></script>',
-    '<script src="/web/_next/static/chunks/app/(public)/reply/%5BtinyUrlId%5D/page-bd52b15b7da15760.js" async=""></script>',
-    '</head><body><form data-slot="composer-root"></form></body></html>'
+    '<script src="/web/_next/static/chunks/webpack-d878e7abadf5a59a.js"></script>',
+    '</head><body><script>self.__next_f.push([1,"1c:I[45712,[\\"872\\",',
+    '\\"static/chunks/872-f7f885460f56ee16.js\\",\\"830\\",',
+    '\\"static/chunks/app/(reply)/reply/%5BtinyUrlId%5D/page-bc45dad094cf3426.js\\"],',
+    '\\"default\\"]"])</script></body></html>'
   ].join("");
+
+  // The same page before Garmin moved the route group, where the chunk was
+  // prefetched as an absolute <script src>.
+  var LEGACY_MESSENGER_HTML =
+    '<script src="/web/_next/static/chunks/app/(public)/reply/%5BtinyUrlId%5D/page-bd52b15b7da15760.js" async=""></script>';
 
   // The shape emitted by the Next.js build for the reply route.
   var CHUNK_JS =
-    'var m=r(70468);let g=(0,m.createServerReference)("60e0518dd113775ab471a769fddd3860d84bad10e6",' +
+    'var m=r(68428);let g=(0,m.createServerReference)("60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf",' +
     'm.callServer,void 0,m.findSourceMapURL,"sendReplyAction");';
 
   // ---------------------------------------------------------------------------
@@ -94,9 +105,16 @@ function runGarminClientTests() {
     assertEquals(body, '["ABC123","say \\"hi\\"\\nthen go"]');
   });
 
-  runner.test("extractReplyChunkPath - finds the reply route chunk", function() {
+  runner.test("extractReplyChunkPath - finds the chunk in the RSC flight payload", function() {
     assertEquals(
       extractReplyChunkPath(MESSENGER_HTML),
+      "/web/_next/static/chunks/app/(reply)/reply/%5BtinyUrlId%5D/page-bc45dad094cf3426.js"
+    );
+  });
+
+  runner.test("extractReplyChunkPath - still reads an absolute <script src>", function() {
+    assertEquals(
+      extractReplyChunkPath(LEGACY_MESSENGER_HTML),
       "/web/_next/static/chunks/app/(public)/reply/%5BtinyUrlId%5D/page-bd52b15b7da15760.js"
     );
   });
@@ -105,11 +123,39 @@ function runGarminClientTests() {
     assertEquals(extractReplyChunkPath("<html><body>nothing</body></html>"), null);
   });
 
+  // The route group is Garmin's to rename, so a page chunk that does not say
+  // "reply" is a later candidate rather than no candidate at all.
+  runner.test("extractReplyChunkPaths - ranks reply chunks ahead of other routes", function() {
+    var html =
+      '"static/chunks/app/(main)/conversations/page-aaaa1111.js",' +
+      '"static/chunks/app/(reply)/reply/%5BtinyUrlId%5D/page-bbbb2222.js"';
+    var paths = extractReplyChunkPaths(html);
+    assertEquals(paths.length, 2);
+    assertEquals(paths[0], "/web/_next/static/chunks/app/(reply)/reply/%5BtinyUrlId%5D/page-bbbb2222.js");
+    assertEquals(paths[1], "/web/_next/static/chunks/app/(main)/conversations/page-aaaa1111.js");
+  });
+
+  runner.test("extractReplyChunkPaths - de-duplicates repeated references", function() {
+    var once = '"static/chunks/app/(reply)/reply/%5BtinyUrlId%5D/page-bbbb2222.js"';
+    assertEquals(extractReplyChunkPaths(once + "," + once).length, 1);
+  });
+
+  runner.test("extractReplyChunkPaths - returns an empty list for empty input", function() {
+    assertEquals(extractReplyChunkPaths(null).length, 0);
+    assertEquals(extractReplyChunkPaths("").length, 0);
+  });
+
   runner.test("extractSendReplyActionId - recovers the live action id", function() {
     assertEquals(
       extractSendReplyActionId(CHUNK_JS),
-      "60e0518dd113775ab471a769fddd3860d84bad10e6"
+      "60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf"
     );
+  });
+
+  runner.test("extractSendReplyActionId - tolerates a dropped call wrapper", function() {
+    var bare = 'm.createServerReference("60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf",' +
+      'm.callServer,void 0,m.findSourceMapURL,"sendReplyAction");';
+    assertEquals(extractSendReplyActionId(bare), "60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf");
   });
 
   runner.test("extractSendReplyActionId - ignores other server references", function() {
@@ -119,7 +165,7 @@ function runGarminClientTests() {
 
   // A Garmin redeploy rotates the hash; discovery is what keeps delivery alive.
   runner.test("extractSendReplyActionId - tracks a rotated hash", function() {
-    var rotated = CHUNK_JS.replace("60e0518dd113775ab471a769fddd3860d84bad10e6", "ffff11112222333344445555666677778888aaaa99");
+    var rotated = CHUNK_JS.replace("60334910b222fcd08a0a5ae00c8a5ad85cb9acffdf", "ffff11112222333344445555666677778888aaaa99");
     assertEquals(extractSendReplyActionId(rotated), "ffff11112222333344445555666677778888aaaa99");
   });
 

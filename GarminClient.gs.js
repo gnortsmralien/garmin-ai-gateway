@@ -330,13 +330,65 @@ function buildReplyActionBody(tinyUrlId, message) {
 /**
  * Locate the reply route's JS chunk in the page HTML.
  *
+ * Next.js writes the path in two shapes and only one of them is absolute: a
+ * prefetched <script src="/web/_next/static/chunks/..."> tag, and - which is
+ * how the reply page actually ships it - a path relative to the build's asset
+ * root inside the RSC flight payload ("static/chunks/app/(reply)/reply/
+ * %5BtinyUrlId%5D/page-<hash>.js"). Both are normalised to an absolute path.
+ *
  * @param {string} html
- * @returns {string|null} chunk path, still URL-encoded as it appears in the HTML
+ * @returns {string|null} absolute chunk path, still URL-encoded
  */
 function extractReplyChunkPath(html) {
-  if (!html) return null;
-  const match = html.match(/\/web\/_next\/static\/chunks\/app\/[^"'\\\s]*reply[^"'\\\s]*page-[a-z0-9]+\.js/i);
-  return match ? match[0] : null;
+  const paths = extractReplyChunkPaths(html);
+  return paths.length ? paths[0] : null;
+}
+
+/**
+ * Every app-route page chunk in the page, reply-route chunks first.
+ *
+ * The route group in the path is Garmin's to rename - it has already moved
+ * once - so a chunk that does not mention the reply route is kept as a later
+ * candidate rather than discarded.
+ *
+ * @param {string} html
+ * @returns {string[]}
+ */
+function extractReplyChunkPaths(html) {
+  if (!html) return [];
+
+  const pattern = /(?:\/web\/_next\/)?static\/chunks\/app\/[^"'\\\s]*page-[a-z0-9]+\.js/gi;
+  const seen = {};
+  const candidates = [];
+
+  let match;
+  while ((match = pattern.exec(html)) !== null) {
+    const path = absoluteChunkPath(match[0]);
+    if (seen[path]) continue;
+    seen[path] = true;
+    candidates.push(path);
+  }
+
+  return candidates.sort(function(a, b) {
+    return replyChunkRank(a) - replyChunkRank(b);
+  });
+}
+
+/**
+ * Chunks naming the reply route sort ahead of the rest.
+ * @private
+ */
+function replyChunkRank(path) {
+  return /reply/i.test(path) ? 0 : 1;
+}
+
+/**
+ * Prefix a build-relative chunk path with the Messenger asset root.
+ * @private
+ */
+function absoluteChunkPath(path) {
+  if (path.indexOf('/web/_next/') === 0) return path;
+  return '/web/_next/' + path.replace(/^\/+/, '');
 }
 
 /**
@@ -347,7 +399,7 @@ function extractReplyChunkPath(html) {
  */
 function extractSendReplyActionId(js) {
   if (!js) return null;
-  const match = js.match(/createServerReference\)\s*\(\s*"([0-9a-f]{20,})"[^)]*?"sendReplyAction"/);
+  const match = js.match(/createServerReference\s*\)?\s*\(\s*"([0-9a-f]{20,})"[^)]*?"sendReplyAction"/);
   return match ? match[1] : null;
 }
 
@@ -375,28 +427,46 @@ function discoverSendReplyActionId(pageUrl) {
       return null;
     }
 
-    const chunkPath = extractReplyChunkPath(pageResponse.getContentText());
-    if (!chunkPath) {
-      debug(`[Garmin] No reply route chunk in page HTML`);
+    const chunkPaths = extractReplyChunkPaths(pageResponse.getContentText());
+    if (!chunkPaths.length) {
+      debug(`[Garmin] No route chunk in page HTML`);
       return null;
     }
 
-    const chunkResponse = UrlFetchApp.fetch(GARMIN.MESSENGER_ORIGIN + chunkPath, {
-      method: 'get',
-      headers: { 'User-Agent': GARMIN.USER_AGENT, 'Accept': '*/*' },
-      muteHttpExceptions: true,
-      followRedirects: true
-    });
+    const probes = Math.min(chunkPaths.length, GARMIN.MAX_CHUNK_PROBES);
+    for (let i = 0; i < probes; i++) {
+      const actionId = actionIdFromChunk(chunkPaths[i]);
+      if (actionId) {
+        debug(`[Garmin] Discovered sendReplyAction id ${actionId} in ${chunkPaths[i]}`);
+        return actionId;
+      }
+    }
 
-    if (chunkResponse.getResponseCode() !== 200) return null;
-
-    const actionId = extractSendReplyActionId(chunkResponse.getContentText());
-    if (actionId) debug(`[Garmin] Discovered sendReplyAction id ${actionId}`);
-    return actionId;
+    debug(`[Garmin] No sendReplyAction in ${probes} of ${chunkPaths.length} chunk(s)`);
+    return null;
   } catch (e) {
     console.error(`[Garmin] Action id discovery failed: ${e}`);
     return null;
   }
+}
+
+/**
+ * Read one route chunk and return the sendReplyAction id it declares, if any.
+ *
+ * @param {string} chunkPath - absolute path on messenger.garmin.com
+ * @returns {string|null}
+ * @private
+ */
+function actionIdFromChunk(chunkPath) {
+  const response = UrlFetchApp.fetch(GARMIN.MESSENGER_ORIGIN + chunkPath, {
+    method: 'get',
+    headers: { 'User-Agent': GARMIN.USER_AGENT, 'Accept': '*/*' },
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+
+  if (response.getResponseCode() !== 200) return null;
+  return extractSendReplyActionId(response.getContentText());
 }
 
 /**
