@@ -416,11 +416,11 @@ function listPendingDeliveries() {
 const PENDING_DRAIN_STAMP_KEY = 'PENDING_DRAIN_LAST';
 
 function drainPendingDeliveries(deadlineMs) {
-  const pending = listPendingDeliveries();
   const result = { attempted: 0, delivered: 0, abandoned: 0, skipped: false };
 
-  if (pending.length === 0) return result;
-
+  // runGateway calls this every minute, and the overwhelming majority of those
+  // runs have nothing parked. Check the one-key throttle stamp before reading
+  // the whole property store, not after.
   const props = PropertiesService.getScriptProperties();
   const last = Number(props.getProperty(PENDING_DRAIN_STAMP_KEY) || 0);
 
@@ -428,6 +428,9 @@ function drainPendingDeliveries(deadlineMs) {
     result.skipped = true;
     return result;
   }
+
+  const pending = listPendingDeliveries();
+  if (pending.length === 0) return result;
 
   props.setProperty(PENDING_DRAIN_STAMP_KEY, String(Date.now()));
   console.log(`[Pager] ${pending.length} parked repl(ies) waiting`);

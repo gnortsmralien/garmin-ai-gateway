@@ -177,12 +177,19 @@ function recordOutcome(lastMsg, messageId, logId, prompt, targetUrl, result) {
   if (attempts >= RETRY.MAX_ATTEMPTS) {
     lastMsg.star();
     clearRetryCount(messageId);
+
     // The answer survives the message giving up: park it for the drain rather
     // than throwing away something already generated and paid for.
-    parkPendingDelivery(messageId, targetUrl);
-    sendErrorToUser(targetUrl, ERROR_MESSAGES.MAX_RETRIES.code, ERROR_MESSAGES.MAX_RETRIES.message);
-    console.error(`[${logId}] MAX RETRIES REACHED (${attempts})`);
-    handleFailure(logId, prompt, `MAX_RETRIES:${result.reason}`);
+    const parked = parkPendingDelivery(messageId, targetUrl);
+
+    // What the user is told has to match what will actually happen. "Try
+    // again" is right when the answer is gone, and actively harmful when it is
+    // queued - they would pay for a second answer and then receive both.
+    const notice = parked ? ERROR_MESSAGES.DELIVERY_PARKED : ERROR_MESSAGES.MAX_RETRIES;
+    sendErrorToUser(targetUrl, notice.code, notice.message);
+
+    console.error(`[${logId}] MAX RETRIES REACHED (${attempts})${parked ? ', reply parked for redelivery' : ''}`);
+    handleFailure(logId, prompt, `MAX_RETRIES:${result.reason}`, parked);
   } else if (result.reason === "GEMINI_RETRYABLE") {
     console.error(`[${logId}] GEMINI OVERLOADED (retry ${attempts}/${RETRY.MAX_ATTEMPTS})`);
   } else {

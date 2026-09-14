@@ -243,6 +243,32 @@ function runHealthTests() {
     assertEquals(probeGarminDelivery("ABC123", http).status, "BROKEN");
   });
 
+  // The bug this guards: counting any 500 as proof of life had the canary
+  // report "healthy" straight through a Garmin backend outage - the one moment
+  // it has to be believed.
+  runner.test("probeGarminDelivery - a plain 500 error page is not proof of life", function() {
+    var http = garminMock(garminDiscoveryRoutes().concat([
+      {
+        method: "post", contains: "/web/reply/", status: 500,
+        body: "<html><head><title>500 Internal Server Error</title></head></html>"
+      }
+    ]));
+
+    assertEquals(probeGarminDelivery("ABC123", http).status, "INCONCLUSIVE");
+  });
+
+  runner.test("isServerActionResponse - accepts a flight stream", function() {
+    assertTrue(isServerActionResponse(200, '0:{"a":"$@1"}\n1:"hi"'));
+    assertTrue(isServerActionResponse(500, '1:E{"digest":"3691864381"}'));
+    assertTrue(isServerActionResponse(303, ""));
+  });
+
+  runner.test("isServerActionResponse - rejects an edge error page", function() {
+    assertFalse(isServerActionResponse(500, "<html>500 Internal Server Error</html>"));
+    assertFalse(isServerActionResponse(502, "Bad Gateway"));
+    assertFalse(isServerActionResponse(200, "<!DOCTYPE html><html>...</html>"));
+  });
+
   runner.test("probeGarminDelivery - INCONCLUSIVE without an id to probe", function() {
     assertEquals(probeGarminDelivery(null, garminMock([])).status, "INCONCLUSIVE");
   });
@@ -328,11 +354,18 @@ function runHealthTests() {
     );
   });
 
-  // Everything above writes to the live property store when run from the Apps
-  // Script editor, so the whole suite runs inside a snapshot.
-  return withPreservedProperties(TOUCHED_PROPERTIES, function() {
-    return runner.run();
-  });
+  // Everything above can write to the live property store when run from the
+  // Apps Script editor, so the whole suite runs inside a snapshot, and the
+  // in-memory alert address is put back too.
+  var originalAlertEmail = SYSTEM.ALERT_EMAIL;
+
+  try {
+    return withPreservedProperties(TOUCHED_PROPERTIES, function() {
+      return runner.run();
+    });
+  } finally {
+    SYSTEM.ALERT_EMAIL = originalAlertEmail;
+  }
 }
 
 // =============================================================================
@@ -381,8 +414,10 @@ function withPreservedProperties(keys, body) {
  * Clear only this suite's keys, and the outbox.
  *
  * Alerting needs a configured address now that there is no owner fallback, so
- * a test one is put back after the wipe - otherwise every "did it alert?"
- * assertion would pass vacuously.
+ * a test one is supplied - via the in-memory SYSTEM.ALERT_EMAIL, never by
+ * writing the real ALERT_EMAIL property. These tests can be run from the Apps
+ * Script editor against the live store, and an execution killed mid-run would
+ * otherwise leave production alerts pointing at example.com.
  * @private
  */
 function resetHealthState() {
@@ -390,7 +425,7 @@ function resetHealthState() {
   for (var i = 0; i < TOUCHED_PROPERTIES.length; i++) {
     props.deleteProperty(TOUCHED_PROPERTIES[i]);
   }
-  props.setProperty("ALERT_EMAIL", "alerts@example.com");
+  SYSTEM.ALERT_EMAIL = "alerts@example.com";
   clearSentEmails();
 }
 
@@ -417,6 +452,8 @@ function withAlertConfig(configValue, propertyValue, body) {
   var originalConfig = SYSTEM.ALERT_EMAIL;
   resetHealthState();
 
+  // Deliberately overrides the address resetHealthState just supplied: these
+  // are the tests about which source wins.
   SYSTEM.ALERT_EMAIL = configValue;
 
   // resetHealthState seeds a default address; these tests are precisely about

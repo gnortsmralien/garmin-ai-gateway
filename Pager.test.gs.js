@@ -350,6 +350,20 @@ function runPagerTests() {
     });
   });
 
+  // The advice given to the user has to match what the system will do. Saying
+  // "try again" while the answer is queued makes them pay for a second one and
+  // then receive both.
+  runner.test("parkPendingDelivery - reports whether anything was parked", function() {
+    withParkedFixture("msg-parked-flag", ["1/2 a", "2/2 b"], 1, function() {
+      assertTrue(parkPendingDelivery("msg-parked-flag", "https://x/reply/tok"),
+        "a parked reply reports true, so the user is told it is queued");
+    });
+
+    clearPageSession("msg-nothing-parked");
+    assertFalse(parkPendingDelivery("msg-nothing-parked", "https://x/reply/tok"),
+      "nothing parked reports false, so the user is told to resend");
+  });
+
   runner.test("parkPendingDelivery - nothing to park is not an error", function() {
     clearPageSession("msg-absent");
     assertFalse(parkPendingDelivery("msg-absent", "https://x/reply/tok"));

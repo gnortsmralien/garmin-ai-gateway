@@ -185,13 +185,17 @@ function cleanupOldRetries() {
  * @param {string} logId
  * @param {string} prompt
  * @param {string} reason
+ * @param {boolean} [parked] - the answer is queued for redelivery
  */
-function handleFailure(logId, prompt, reason) {
+function handleFailure(logId, prompt, reason, parked) {
   console.error(`[${logId}] FAILURE LOGGED: ${reason}`);
 
   sendAlert(`Gateway failure: ${logId}`, [
     `A message was answered but could not be delivered, or could not be`,
-    `answered at all. It will not be retried.`,
+    parked
+      ? `answered at all. The answer is queued and will be redelivered once`
+      : `answered at all. It will not be retried.`,
+    parked ? `Garmin accepts replies again, or dropped if it goes stale first.` : ``,
     ``,
     `Log ID: ${logId}`,
     `Reason: ${reason}`,

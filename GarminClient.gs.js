@@ -648,14 +648,15 @@ function probeGarminDelivery(tinyUrlId, httpClient) {
 
   const code = response.getResponseCode();
 
-  // The action ran and refused the impossible id. That refusal IS the pass:
-  // it can only come from code that exists and is reachable.
-  const reached = code === 200 || code === 303 || code === 500;
-
-  if (!reached) {
+  // The action ran and refused the impossible id. That refusal IS the pass -
+  // only code that exists and is reachable can produce it. But it has to be
+  // the ACTION's refusal, not an edge server's: counting any 500 as proof of
+  // life would have the canary report "healthy" straight through a Garmin
+  // backend outage, which is the one moment it needs to be believed.
+  if (!isServerActionResponse(code, safeBody(response))) {
     return {
       status: 'INCONCLUSIVE',
-      detail: `unexpected HTTP ${code} from the reply route`,
+      detail: `HTTP ${code} from the reply route, but not a server-action answer`,
       actionId: actionId,
       discovered: !!discovered
     };
@@ -676,6 +677,39 @@ function probeGarminDelivery(tinyUrlId, httpClient) {
     actionId: actionId,
     discovered: true
   };
+}
+
+/**
+ * Does this answer actually come from the server action, rather than from
+ * something in front of it?
+ *
+ * Next.js answers an action with a React flight stream - numbered rows like
+ * `0:{...}` and `1:E{"digest":"..."}` for one that threw - or a 303 when it
+ * redirects. A Cloudflare or Garmin error page carries none of that, so a bare
+ * 500 proves nothing about whether sendReplyAction still exists.
+ *
+ * @param {number} code
+ * @param {string} body
+ * @returns {boolean}
+ */
+function isServerActionResponse(code, body) {
+  if (code === 303) return true;
+  if (code !== 200 && code !== 500) return false;
+
+  // A flight row, or the digest an action's own exception produces.
+  return /^\s*\d+\s*:/.test(body || '') || /"digest"\s*:/.test(body || '');
+}
+
+/**
+ * Read a response body without letting a decoding failure become an exception.
+ * @private
+ */
+function safeBody(response) {
+  try {
+    return response.getContentText() || '';
+  } catch (e) {
+    return '';
+  }
 }
 
 /**

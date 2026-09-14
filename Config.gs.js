@@ -152,6 +152,14 @@ const ERROR_MESSAGES = {
     code: "ERR:RETRY",
     message: "Failed 3x. Wait 5min, try simpler query or WIKI/NEWS."
   },
+
+  // Delivery failed but the answer survived and is queued for redelivery.
+  // Telling someone to resend here would be wrong advice: they would pay for a
+  // second answer and then receive both.
+  DELIVERY_PARKED: {
+    code: "ERR:QUEUED",
+    message: "Answer ready, Garmin link down. It will arrive when the link is back. No need to resend."
+  },
   SEND_FAILED: {
     code: "ERR:SEND",
     message: "Reply failed. Resend your msg or try shorter query."
