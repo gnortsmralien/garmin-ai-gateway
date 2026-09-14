@@ -19,11 +19,16 @@
 // =============================================================================
 
 /**
- * Where alerts go.
+ * Where alerts go: SYSTEM.ALERT_EMAIL if set, otherwise the ALERT_EMAIL script
+ * property, which keeps a personal address out of a public repository.
  *
- * SYSTEM.ALERT_EMAIL wins if set. Otherwise the ALERT_EMAIL script property,
- * which keeps a personal address out of a public repository. Otherwise the
- * script owner, so the useful default needs no configuration at all.
+ * There is deliberately NO "just use the script owner" fallback, convenient as
+ * that would be. Session.getEffectiveUser() pulls the userinfo.email scope into
+ * a project that needs three scopes without it, and a changed scope set makes
+ * Apps Script demand re-authorisation before it will create a trigger or, in
+ * the worse case, keep running the existing ones. A gateway whose entire
+ * failure history is silent breakage should not take on a new way to break
+ * silently in order to save one line of configuration.
  *
  * @returns {string|null}
  */
@@ -34,14 +39,7 @@ function resolveAlertEmail() {
     const configured = PropertiesService.getScriptProperties().getProperty('ALERT_EMAIL');
     if (configured && configured.length > 0) return configured;
   } catch (e) {
-    // Property store unavailable; fall through to the owner.
-  }
-
-  try {
-    const owner = Session.getEffectiveUser().getEmail();
-    if (owner && owner.length > 0) return owner;
-  } catch (e) {
-    console.error(`[Health] Could not resolve an alert address: ${e}`);
+    console.error(`[Health] Could not read the ALERT_EMAIL property: ${e}`);
   }
 
   return null;

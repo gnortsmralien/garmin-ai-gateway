@@ -34,18 +34,29 @@ function runHealthTests() {
     });
   });
 
-  // Needing no configuration is the point: the previous alerting was wired
-  // correctly and stayed silent through two outages because nobody filled it in.
-  runner.test("resolveAlertEmail - falls back to the script owner", function() {
+  // No owner fallback on purpose - reading the owner's address costs an extra
+  // OAuth scope, and a changed scope set makes Apps Script demand
+  // re-authorisation before it will create a trigger. An unset address is
+  // loud in the log rather than silently misdirected.
+  runner.test("resolveAlertEmail - returns null when nothing is configured", function() {
     withAlertConfig(null, null, function() {
-      assertTrue(resolveAlertEmail().length > 0, "the owner address is always available");
+      assertEquals(resolveAlertEmail(), null);
+    });
+  });
+
+  runner.test("sendAlert - reports rather than throws when there is no address", function() {
+    withAlertConfig(null, null, function() {
+      assertFalse(sendAlert("nowhere to send this", "body"));
+      assertEquals(sentEmailCount(), 0);
     });
   });
 
   runner.test("sendAlert - sends, and prefixes the subject", function() {
-    resetHealthState();
-    assertTrue(sendAlert("Something happened", "body text"));
-    assertEquals(lastSentEmail().subject, "[SAT-COM] Something happened");
+    withAlertConfig(null, "alerts@example.com", function() {
+      assertTrue(sendAlert("Something happened", "body text"));
+      assertEquals(lastSentEmail().to, "alerts@example.com");
+      assertEquals(lastSentEmail().subject, "[SAT-COM] Something happened");
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -366,12 +377,20 @@ function withPreservedProperties(keys, body) {
   }
 }
 
-/** Clear only this suite's keys, and the outbox. @private */
+/**
+ * Clear only this suite's keys, and the outbox.
+ *
+ * Alerting needs a configured address now that there is no owner fallback, so
+ * a test one is put back after the wipe - otherwise every "did it alert?"
+ * assertion would pass vacuously.
+ * @private
+ */
 function resetHealthState() {
   var props = PropertiesService.getScriptProperties();
   for (var i = 0; i < TOUCHED_PROPERTIES.length; i++) {
     props.deleteProperty(TOUCHED_PROPERTIES[i]);
   }
+  props.setProperty("ALERT_EMAIL", "alerts@example.com");
   clearSentEmails();
 }
 
@@ -399,8 +418,13 @@ function withAlertConfig(configValue, propertyValue, body) {
   resetHealthState();
 
   SYSTEM.ALERT_EMAIL = configValue;
+
+  // resetHealthState seeds a default address; these tests are precisely about
+  // which source wins, so the property is set or removed explicitly here.
   if (propertyValue) {
     PropertiesService.getScriptProperties().setProperty("ALERT_EMAIL", propertyValue);
+  } else {
+    PropertiesService.getScriptProperties().deleteProperty("ALERT_EMAIL");
   }
 
   try {

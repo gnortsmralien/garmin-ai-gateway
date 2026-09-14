@@ -105,7 +105,13 @@ Users can trigger specialized tools by including keywords in their messages:
      - Type: Minutes timer
      - Interval: Every 1 minutes (or your preference)
 
-7. **Set up the canary trigger** (recommended)
+7. **Set the alert address**
+   - Project Settings -> Script Properties -> add `ALERT_EMAIL`, set to the
+     address that should receive failure and degradation alerts
+   - Without it the gateway still runs, but every alert is logged as
+     undeliverable - which is the exact failure mode this machinery exists to end
+
+8. **Set up the canary trigger** (recommended)
    - Add a second trigger in the same place:
      - Function: `runGarminCanary`
      - Event source: Time-driven
@@ -118,7 +124,7 @@ Users can trigger specialized tools by including keywords in their messages:
      `script.scriptapp` OAuth scope into a project that does not otherwise use
      it, and every existing trigger would stop until you re-authorised
 
-8. **Configure your InReach device**
+9. **Configure your InReach device**
    - Send messages directly from your InReach device to any email address you monitor with Gmail
    - Messages must start with "AI: " to be processed
    - Enable "Send Location" in message settings for GPS-based features to work
@@ -234,9 +240,15 @@ noticed days later that answers had stopped coming.
 None of the following makes Garmin more stable. They make a change *visible*.
 
 **Alerts go out by email**, never over Garmin - the channel that breaks is no
-place to report that it has broken. No configuration is needed: alerts go to
-the `ALERT_EMAIL` script property if you set one, and to the script owner
-otherwise.
+place to report that it has broken. Set an `ALERT_EMAIL` script property to the
+address they should reach.
+
+There is deliberately no "just use the script owner" default. Reading the
+owner's address costs the `userinfo.email` OAuth scope, and changing a
+project's scope set makes Apps Script demand re-authorisation before it will
+create a trigger - or keep running the ones you already have. A gateway whose
+entire failure history is silent breakage should not buy a new way to break
+silently for the sake of one line of configuration.
 
 **Falling back is never silent.** Delivery needs a Next.js server action id
 that rotates on every Garmin front-end deploy, so it is rediscovered at run

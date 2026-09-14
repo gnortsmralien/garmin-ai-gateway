@@ -14,9 +14,11 @@ const SYSTEM = {
   SIMULATE_GARMIN: false,  // Production mode - messages sent to Garmin
   DEBUG_MODE: false,       // Set to true for verbose logging
 
-  // Where failure and degradation alerts go. null means "resolve at run time":
-  // the ALERT_EMAIL script property if set, otherwise the script owner. Alerts
-  // must never travel over Garmin - that is the channel that breaks.
+  // Where failure and degradation alerts go. null means "read the ALERT_EMAIL
+  // script property", which keeps a personal address out of the repository.
+  // There is no owner fallback - see resolveAlertEmail for why an extra OAuth
+  // scope is a bad trade here. Alerts must never travel over Garmin: that is
+  // the channel that breaks.
   ALERT_EMAIL: null,
 
   // Auto-start a new conversation after this period of silence
