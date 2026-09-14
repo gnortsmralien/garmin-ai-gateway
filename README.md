@@ -105,7 +105,20 @@ Users can trigger specialized tools by including keywords in their messages:
      - Type: Minutes timer
      - Interval: Every 1 minutes (or your preference)
 
-7. **Configure your InReach device**
+7. **Set up the canary trigger** (recommended)
+   - Add a second trigger in the same place:
+     - Function: `runGarminCanary`
+     - Event source: Time-driven
+     - Type: Hour timer
+     - Interval: Every hour
+   - This checks that Garmin reply delivery still works *without sending a
+     satellite message*, and emails you when it stops. See
+     [Watching for the next break](#watching-for-the-next-break)
+   - It is added by hand on purpose: installing it from code would pull the
+     `script.scriptapp` OAuth scope into a project that does not otherwise use
+     it, and every existing trigger would stop until you re-authorised
+
+8. **Configure your InReach device**
    - Send messages directly from your InReach device to any email address you monitor with Gmail
    - Messages must start with "AI: " to be processed
    - Enable "Send Location" in message settings for GPS-based features to work
@@ -198,6 +211,74 @@ npm run verify
 
 # Lint code
 npm run lint
+
+# Refresh the captured Garmin fixtures from the live reply page
+npm run capture-fixtures -- <tinyUrlId>
+```
+
+Integration tests hit real endpoints. The Garmin delivery check is skipped
+unless `GARMIN_REPLY_TOKEN` is set, because Garmin only serves a real reply
+page for a live token:
+
+```bash
+GARMIN_REPLY_TOKEN=<tinyUrlId> npm run test:integration
+```
+
+## Watching for the next break
+
+Garmin's reply surface is scraped, not consumed through an API, and it has
+changed under this project twice. Both times the gateway carried on looking
+healthy while dropping every reply at the last step, and both times a person
+noticed days later that answers had stopped coming.
+
+None of the following makes Garmin more stable. They make a change *visible*.
+
+**Alerts go out by email**, never over Garmin - the channel that breaks is no
+place to report that it has broken. No configuration is needed: alerts go to
+the `ALERT_EMAIL` script property if you set one, and to the script owner
+otherwise.
+
+**Falling back is never silent.** Delivery needs a Next.js server action id
+that rotates on every Garmin front-end deploy, so it is rediscovered at run
+time with a pinned constant as a fallback. That fallback masked a completely
+broken discovery path for weeks. Every use of it is now counted and reported
+(`recordDegradation` in `Health.gs.js`), at most one email per problem per six
+hours, with the running total.
+
+**The canary probes delivery for free.** `runGarminCanary` calls the real
+server action with a reply id no conversation can own: the action runs, finds
+no recipient, and no satellite message is produced. It reports one of
+
+| Status | Meaning |
+| --- | --- |
+| `HEALTHY` | discovery worked and the action answered |
+| `DEGRADED` | discovery failed, the pinned fallback is still holding - the leading indicator |
+| `BROKEN` | the action id is not served; replies are being dropped right now |
+| `INCONCLUSIVE` | Garmin unreachable, or the stored reply id has expired - proves nothing, so it stays quiet |
+
+**Undelivered answers are kept, not binned.** A reply that survives its retries
+is parked with its pages and redelivered by `drainPendingDeliveries` once
+Garmin recovers, so an outage costs latency rather than the answer and the
+tokens it took. Parked replies older than two hours are dropped instead: a
+satellite answer that arrives that late is noise to someone who has moved on.
+
+**Fixtures are captured, not written.** The unit fixture for the reply page
+used to be typed by hand from what the author believed Garmin emitted. Garmin
+emitted something else, so the suite stayed green through a total outage it was
+written to catch. `GarminFixtures.gs.js` is now generated from the live page:
+
+```bash
+# token from any recent inReach email: https://inreachlink.com/<token>
+npm run capture-fixtures -- <tinyUrlId>
+```
+
+**The live check covers Garmin too.** Every other dependency had an integration
+test from day one; the one that actually broke had none. Give the integration
+run a live reply token and it walks the whole chain - reply page, route chunk,
+action id, action call:
+
+```bash
+GARMIN_REPLY_TOKEN=<tinyUrlId> npm run test:integration
 ```
 
 ## Architecture
@@ -209,6 +290,7 @@ npm run lint
 - **Tool System** (`Toolbox.gs.js` + `*Tool.gs.js`): Modular tools for specialized data sources (Wikipedia, weather, news, disasters, geocoding)
 - **AI Pipeline** (`Code.js`): A single budgeted call, with a conditional shrink pass on overshoot
 - **Message Pagination** (`Pager.gs.js`): Prefix-aware splitting, ordered delivery, per-page retries and resume-after-interruption
+- **Health & Canary** (`Health.gs.js`): Out-of-band alerting, degradation counters for every silent fallback, and a delivery probe that costs no satellite messages
 - **Error Handling**: Message-level retry logic and user-visible error messages on the device
 - **Dependency Injection**: Testable architecture with mock-friendly design; the paging and parsing logic is pure and covered by unit tests
 

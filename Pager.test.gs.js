@@ -331,6 +331,133 @@ function runPagerTests() {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Parked replies
+  //
+  // An answer that could not be delivered has already been generated and paid
+  // for, and its Gmail message is starred by the time it gets here - so the
+  // drain is the only thing in the system that will ever look at it again.
+  // ---------------------------------------------------------------------------
+
+  runner.test("parkPendingDelivery - keeps the undelivered pages", function() {
+    withParkedFixture("msg-park", ["1/2 a", "2/2 b"], 1, function() {
+      assertTrue(parkPendingDelivery("msg-park", "https://x/reply/tok"));
+
+      var state = loadPageSession("msg-park");
+      assertTrue(state.parked, "the session is marked parked");
+      assertEquals(state.sent, 1, "the delivered page is not resent");
+      assertEquals(state.url, "https://x/reply/tok");
+    });
+  });
+
+  runner.test("parkPendingDelivery - nothing to park is not an error", function() {
+    clearPageSession("msg-absent");
+    assertFalse(parkPendingDelivery("msg-absent", "https://x/reply/tok"));
+  });
+
+  runner.test("listPendingDeliveries - returns only parked sessions", function() {
+    withParkedFixture("msg-parked-one", ["1/2 a", "2/2 b"], 1, function() {
+      withParkedFixture("msg-inflight", ["1/2 c", "2/2 d"], 1, function() {
+        parkPendingDelivery("msg-parked-one", "https://x/reply/tok");
+
+        var ids = listPendingDeliveries().map(function(p) { return p.messageId; });
+        assertTrue(ids.indexOf("msg-parked-one") !== -1, "the parked one is listed");
+        assertTrue(ids.indexOf("msg-inflight") === -1, "an in-flight checkpoint is not");
+      });
+    });
+  });
+
+  runner.test("drainPendingDeliveries - delivers a parked reply and clears it", function() {
+    withParkedFixture("msg-drain", ["1/2 a", "2/2 b"], 1, function() {
+      parkPendingDelivery("msg-drain", "https://x/reply/tok");
+      clearDrainThrottle();
+
+      var sent = [];
+      withStubbedGarmin(function() { return true; }, sent, function() {
+        var result = drainPendingDeliveries(Date.now() + 60000);
+
+        assertEquals(result.delivered, 1);
+        assertEquals(sent.length, 1, "only the outstanding page goes out");
+        assertEquals(sent[0], "2/2 b");
+        assertEquals(loadPageSession("msg-drain"), null, "a drained reply is cleared");
+      });
+    });
+  });
+
+  runner.test("drainPendingDeliveries - leaves it parked when delivery still fails", function() {
+    withParkedFixture("msg-still-down", ["1/2 a", "2/2 b"], 1, function() {
+      parkPendingDelivery("msg-still-down", "https://x/reply/tok");
+      clearDrainThrottle();
+
+      var sent = [];
+      withStubbedGarmin(function() { return false; }, sent, function() {
+        var result = drainPendingDeliveries(Date.now() + 60000);
+
+        assertEquals(result.delivered, 0);
+        assertEquals(result.attempted, 1);
+
+        var state = loadPageSession("msg-still-down");
+        assertNotNull(state, "the answer survives a failed drain");
+        assertTrue(state.parked, "and is still parked for the next attempt");
+      });
+    });
+  });
+
+  // A satellite answer that turns up hours late is noise to someone who has
+  // long since moved on, so staleness wins over completeness.
+  runner.test("drainPendingDeliveries - abandons a reply that has aged out", function() {
+    withParkedFixture("msg-stale", ["1/2 a", "2/2 b"], 1, function() {
+      parkPendingDelivery("msg-stale", "https://x/reply/tok");
+
+      var state = loadPageSession("msg-stale");
+      state.timestamp = Date.now() - HEALTH.PENDING_MAX_AGE_MS - 60000;
+      PropertiesService.getScriptProperties()
+        .setProperty("PAGES_msg-stale", JSON.stringify(state));
+      clearDrainThrottle();
+
+      var sent = [];
+      withStubbedGarmin(function() { return true; }, sent, function() {
+        var result = drainPendingDeliveries(Date.now() + 60000);
+
+        assertEquals(result.abandoned, 1);
+        assertEquals(sent.length, 0, "nothing stale is delivered");
+        assertEquals(loadPageSession("msg-stale"), null);
+      });
+    });
+  });
+
+  // The gateway fires every minute; retrying a parked reply that often would
+  // just hammer a Garmin that is already down.
+  runner.test("drainPendingDeliveries - throttles between attempts", function() {
+    withParkedFixture("msg-throttle", ["1/2 a", "2/2 b"], 1, function() {
+      parkPendingDelivery("msg-throttle", "https://x/reply/tok");
+      clearDrainThrottle();
+
+      var sent = [];
+      withStubbedGarmin(function() { return false; }, sent, function() {
+        var first = drainPendingDeliveries(Date.now() + 60000);
+        assertEquals(first.attempted, 1);
+
+        var second = drainPendingDeliveries(Date.now() + 60000);
+        assertTrue(second.skipped, "the immediate re-run is throttled");
+        assertEquals(second.attempted, 0);
+      });
+    });
+  });
+
+  runner.test("checkpointPages - a drain mid-flight does not unpark the reply", function() {
+    // Losing the flag here would strand the answer permanently: its Gmail
+    // message is starred, so nothing but the drain would ever retry it.
+    withParkedFixture("msg-keep-parked", ["1/3 a", "2/3 b", "3/3 c"], 1, function() {
+      parkPendingDelivery("msg-keep-parked", "https://x/reply/tok");
+      checkpointPages("msg-keep-parked", ["1/3 a", "2/3 b", "3/3 c"], 2, "https://x/reply/tok");
+
+      var state = loadPageSession("msg-keep-parked");
+      assertTrue(state.parked, "still parked after a partial drain");
+      assertEquals(state.sent, 2);
+    });
+  });
+
   return runner.run();
 }
 
@@ -391,4 +518,26 @@ function repeatWord(word, chars) {
 /** @private */
 function words(text) {
   return text.split(/\s+/).filter(function(w) { return w.length > 0; });
+}
+
+/**
+ * Seed a checkpointed session, run `body`, then remove it. Keyed by a
+ * test-only message id so the live property store is never disturbed.
+ * @private
+ */
+function withParkedFixture(messageId, pages, sent, body) {
+  clearPageSession(messageId);
+  checkpointPages(messageId, pages, sent, "https://x/reply/tok");
+
+  try {
+    body();
+  } finally {
+    clearPageSession(messageId);
+    clearDrainThrottle();
+  }
+}
+
+/** @private */
+function clearDrainThrottle() {
+  PropertiesService.getScriptProperties().deleteProperty(PENDING_DRAIN_STAMP_KEY);
 }

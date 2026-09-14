@@ -14,6 +14,9 @@ const SYSTEM = {
   SIMULATE_GARMIN: false,  // Production mode - messages sent to Garmin
   DEBUG_MODE: false,       // Set to true for verbose logging
 
+  // Where failure and degradation alerts go. null means "resolve at run time":
+  // the ALERT_EMAIL script property if set, otherwise the script owner. Alerts
+  // must never travel over Garmin - that is the channel that breaks.
   ALERT_EMAIL: null,
 
   // Auto-start a new conversation after this period of silence
@@ -48,6 +51,11 @@ const GARMIN = {
   // chunks are tried first, so the first probe almost always wins.
   MAX_CHUNK_PROBES: 3,
 
+  // tinyUrlId the canary sends so the server action is exercised without
+  // delivering anything. No real reply id can collide with it, so the action
+  // is reached, rejects the id, and no satellite message is ever produced.
+  CANARY_INVALID_ID: "canary-probe-not-a-real-reply-id",
+
   // The Messenger composer caps a reply at 160 characters.
   MAX_MESSAGE_CHARS: 160,
 
@@ -77,6 +85,39 @@ const LIMITS = {
 
   // Unsent page sessions older than this are abandoned
   PAGE_SESSION_TTL_MS: 6 * 60 * 60 * 1000
+};
+
+// =============================================================================
+// ===============================  HEALTH  ====================================
+// =============================================================================
+
+// Both outages so far were the same shape: a scraped Garmin surface changed,
+// the gateway carried on as though nothing had happened, and the reply was
+// dropped at the last step. Nothing here makes Garmin more stable - it makes a
+// change VISIBLE, on a channel that does not depend on Garmin working.
+const HEALTH = {
+  // One alert per degradation kind per window. The counter keeps rising in the
+  // background, so the follow-up alert reports the true total.
+  ALERT_COOLDOWN_MS: 6 * 60 * 60 * 1000,
+
+  // A reply id the canary can probe with. Refreshed from every inbound
+  // message; a probe against a stale one degrades to INCONCLUSIVE rather than
+  // crying wolf.
+  TOKEN_TTL_MS: 7 * 24 * 60 * 60 * 1000,
+
+  // A reply nobody could deliver is parked rather than binned, so a Garmin
+  // outage costs latency instead of the answer and the tokens it took. Past
+  // this age the answer is stale enough that delivering it would confuse more
+  // than it helps.
+  PENDING_MAX_AGE_MS: 2 * 60 * 60 * 1000,
+
+  // Parked replies drained per attempt, so a backlog cannot eat the execution
+  // budget that live messages need.
+  PENDING_DRAIN_PER_RUN: 2,
+
+  // The gateway runs every minute; retrying a parked reply that often would
+  // just hammer a Garmin that is already down. The reply is late either way.
+  PENDING_DRAIN_INTERVAL_MS: 5 * 60 * 1000
 };
 
 const RETRY = {

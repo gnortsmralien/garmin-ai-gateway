@@ -14,6 +14,11 @@
 function runGateway() {
   const deadline = Date.now() + SYSTEM.EXECUTION_BUDGET_MS;
 
+  // Replies parked by an earlier delivery outage come first. They are already
+  // generated and paid for, their Gmail messages are starred, and nothing else
+  // in the pipeline will ever look at them again.
+  drainPendingDeliveries(deadline);
+
   const senderQuery = `from:({${SYSTEM.TRUSTED_EMAILS.join(" ")}})`;
   const fullQuery = `${senderQuery} "AI:" ${SYSTEM.SEARCH_WINDOW}`;
   debug(`[runGateway] Search query: ${fullQuery}`);
@@ -97,6 +102,10 @@ function handleThread(thread, processedIds, deadline) {
   const replyAddress = extractRecipientAddress(safeGetTo(lastMsg));
   const targetUrl = resolveInreachLink(link, replyAddress);
 
+  // Keep the newest reply id where the canary can find it. Probing delivery
+  // needs a live reply page, and Garmin only serves one for a real id.
+  rememberReplyToken(extractTinyUrlId(targetUrl));
+
   const parsed = parseAiPrompt(body);
   if (!parsed.ok) {
     debug(`[runGateway] Skipping message: ${parsed.reason}`);
@@ -125,7 +134,7 @@ function handleThread(thread, processedIds, deadline) {
     if (attempts >= RETRY.MAX_ATTEMPTS) {
       lastMsg.star();
       clearRetryCount(messageId);
-      clearPageSession(messageId);
+      parkPendingDelivery(messageId, targetUrl);
       sendErrorToUser(targetUrl, ERROR_MESSAGES.EXCEPTION.code, ERROR_MESSAGES.EXCEPTION.message);
       handleFailure(logId, parsed.prompt, `EXCEPTION:${e.message || e}`);
     } else {
@@ -168,7 +177,9 @@ function recordOutcome(lastMsg, messageId, logId, prompt, targetUrl, result) {
   if (attempts >= RETRY.MAX_ATTEMPTS) {
     lastMsg.star();
     clearRetryCount(messageId);
-    clearPageSession(messageId);
+    // The answer survives the message giving up: park it for the drain rather
+    // than throwing away something already generated and paid for.
+    parkPendingDelivery(messageId, targetUrl);
     sendErrorToUser(targetUrl, ERROR_MESSAGES.MAX_RETRIES.code, ERROR_MESSAGES.MAX_RETRIES.message);
     console.error(`[${logId}] MAX RETRIES REACHED (${attempts})`);
     handleFailure(logId, prompt, `MAX_RETRIES:${result.reason}`);

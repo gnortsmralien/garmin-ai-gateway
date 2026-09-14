@@ -21,6 +21,7 @@ function runAllTests() {
     ["Utilities & Conversation State", runUtilsTests],
     ["Message Parser", runMessageParserTests],
     ["Garmin Messenger Client", runGarminClientTests],
+    ["Health & Canary", runHealthTests],
     ["Paging Engine", runPagerTests],
     ["Toolbox Triggers", runToolboxTests],
     ["Gemini Interactions Client", runGeminiClientTests]

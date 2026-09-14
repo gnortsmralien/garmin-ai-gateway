@@ -216,7 +216,113 @@ function runGarminClientTests() {
     assertTrue(!session.send(repeatChar("x", GARMIN.MAX_MESSAGE_CHARS + 1), false));
   });
 
-  return runner.run();
+  // ---------------------------------------------------------------------------
+  // Delivery
+  //
+  // This path used to be untestable - the session reached straight for
+  // UrlFetchApp, and the Pager tests stubbed the whole session out. So a send
+  // that answered 404 on every single call shipped twice without a failing
+  // test. The HTTP client is injectable now; these exercise the real thing.
+  // ---------------------------------------------------------------------------
+
+  runner.test("send - posts the discovered action id", function() {
+    var http = deliveringGarminMock();
+    var session = createGarminSession("https://inreachlink.com/ABC123", http);
+
+    assertTrue(session.send("Rain expected. Descend before dusk.", false));
+
+    var posts = http.posts();
+    assertEquals(posts.length, 1);
+    assertEquals(posts[0].options.headers["Next-Action"], GARMIN_FIXTURES.ACTION_ID);
+    assertTrue(
+      posts[0].options.payload.indexOf("ABC123") !== -1,
+      "the reply id is the first server-action argument"
+    );
+  });
+
+  // The outage, healed in place: Garmin says the hash is gone, so rediscover
+  // and re-post now rather than spending a delivery attempt on a dead id.
+  runner.test("send - rediscovers and re-posts when the action id has rotated", function() {
+    var http = garminMock(garminDiscoveryRoutes().concat([
+      {
+        method: "post", contains: "/web/reply/", status: 404, times: 1,
+        body: "Server action not found.", headers: { "x-nextjs-action-not-found": "1" }
+      },
+      { method: "post", contains: "/web/reply/", status: 200, body: "0:null" }
+    ]));
+
+    // Start from a stale pinned id, as a session would after a Garmin deploy.
+    var session = createGarminSession("https://inreachlink.com/ABC123", http);
+    session.actionId = "deadbeefdeadbeefdeadbeefdeadbeef00";
+
+    assertTrue(session.send("hello", false), "the retry inside the same attempt succeeds");
+    assertEquals(http.posts().length, 2);
+    assertEquals(http.posts()[1].options.headers["Next-Action"], GARMIN_FIXTURES.ACTION_ID);
+  });
+
+  // If rediscovery can only hand back the id that just failed, posting it a
+  // second time would be pure waste.
+  runner.test("send - does not re-post when rediscovery returns the same dead id", function() {
+    var http = garminMock([
+      { method: "get", contains: "/web/reply/", status: 200, body: "<html>no route chunk</html>" },
+      {
+        method: "post", contains: "/web/reply/", status: 404,
+        body: "Server action not found.", headers: { "x-nextjs-action-not-found": "1" }
+      }
+    ]);
+
+    var session = createGarminSession("https://inreachlink.com/ABC123", http);
+
+    assertFalse(session.send("hello", false));
+    assertEquals(http.posts().length, 1);
+  });
+
+  runner.test("send - a thrown server action is a failed delivery", function() {
+    var http = garminMock(garminDiscoveryRoutes().concat([
+      { method: "post", contains: "/web/reply/", status: 200, body: '1:E{"digest":"3691864381"}' }
+    ]));
+
+    var session = createGarminSession("https://inreachlink.com/ABC123", http);
+    assertFalse(session.send("hello", false));
+  });
+
+  // The leading indicator. Delivery still works here - the pinned id answers -
+  // but this is exactly the state that held silently for weeks last time.
+  runner.test("send - records a degradation when it has to use the pinned id", function() {
+    resetHealthState();
+
+    var http = garminMock([
+      { method: "get", contains: "/web/reply/", status: 200, body: "<html>no route chunk</html>" },
+      { method: "post", contains: "/web/reply/", status: 200, body: "0:null" }
+    ]);
+
+    var session = createGarminSession("https://inreachlink.com/ABC123", http);
+
+    assertTrue(session.send("hello", false), "the fallback still delivers");
+    assertEquals(session.actionId, GARMIN.SEND_REPLY_ACTION_ID);
+
+    var state = degradationState("ACTION_ID_DISCOVERY");
+    assertNotNull(state, "falling back is never silent");
+    assertEquals(state.count, 1);
+
+    resetHealthState();
+  });
+
+  runner.test("send - a successful discovery clears a standing degradation", function() {
+    resetHealthState();
+    recordDegradation("ACTION_ID_DISCOVERY", "an earlier failure");
+
+    var session = createGarminSession("https://inreachlink.com/ABC123", deliveringGarminMock());
+    assertTrue(session.send("hello", false));
+    assertEquals(degradationState("ACTION_ID_DISCOVERY"), null, "recovery is recorded too");
+
+    resetHealthState();
+  });
+
+  // Alerting writes to the live property store when this runs in the editor.
+  return withPreservedProperties(TOUCHED_PROPERTIES, function() {
+    return runner.run();
+  });
 }
 
 /** @private */

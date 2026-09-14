@@ -175,18 +175,27 @@ function cleanupOldRetries() {
 // =============================  FAILURE ALERTING  ============================
 // =============================================================================
 
+/**
+ * A message was lost. Report it out of band.
+ *
+ * This used to be inert unless SYSTEM.ALERT_EMAIL was filled in by hand, and
+ * it never was, so two outages ran their course unannounced. Addressing is now
+ * resolved at run time (see resolveAlertEmail) and needs no configuration.
+ *
+ * @param {string} logId
+ * @param {string} prompt
+ * @param {string} reason
+ */
 function handleFailure(logId, prompt, reason) {
   console.error(`[${logId}] FAILURE LOGGED: ${reason}`);
 
-  if (SYSTEM.ALERT_EMAIL && SYSTEM.ALERT_EMAIL.length > 0) {
-    try {
-      MailApp.sendEmail({
-        to: SYSTEM.ALERT_EMAIL,
-        subject: `[SAT-COM] Gateway Failure: ${logId}`,
-        body: `Log ID: ${logId}\nReason: ${reason}\nPrompt: ${prompt}\nTime: ${new Date().toISOString()}`
-      });
-    } catch (e) {
-      console.error(`[Alert] Email failed: ${e}`);
-    }
-  }
+  sendAlert(`Gateway failure: ${logId}`, [
+    `A message was answered but could not be delivered, or could not be`,
+    `answered at all. It will not be retried.`,
+    ``,
+    `Log ID: ${logId}`,
+    `Reason: ${reason}`,
+    `Prompt: ${prompt}`,
+    `Time:   ${new Date().toISOString()}`
+  ].join('\n'));
 }

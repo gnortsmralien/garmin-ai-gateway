@@ -21,8 +21,11 @@
  * reuses both for every page of a multi-page reply.
  */
 
-function GarminSession(url) {
+function GarminSession(url, httpClient) {
   this.url = url;
+  // Injectable so the delivery path itself is unit-testable. It was not, which
+  // is how a send that 404'd on every call shipped twice.
+  this.http = httpClient || createHttpClient();
   this.tinyUrlId = extractTinyUrlId(url);
   this.legacy = isLegacyReplyUrl(url);
 
@@ -78,20 +81,20 @@ GarminSession.prototype.sendMessenger = function(message, refresh) {
 
     debug(`[Garmin] Server action POST ${this.pageUrl} (${message.length} chars)`);
 
-    const response = UrlFetchApp.fetch(this.pageUrl, {
-      method: 'post',
-      contentType: 'text/plain;charset=UTF-8',
-      payload: buildReplyActionBody(this.tinyUrlId, message),
-      followRedirects: true,
-      headers: {
-        'User-Agent': GARMIN.USER_AGENT,
-        'Accept': 'text/x-component',
-        'Next-Action': actionId,
-        'Referer': this.pageUrl,
-        'Origin': GARMIN.MESSENGER_ORIGIN
-      },
-      muteHttpExceptions: true
-    });
+    let response = this.postReplyAction(actionId, message);
+
+    // Garmin answers a retired action id with a header that says exactly that.
+    // Treat it as the instruction it is: rediscover and re-post now, rather
+    // than spending a delivery attempt and a backoff replaying a dead hash.
+    if (isActionNotFound(response)) {
+      recordDegradation('GARMIN_ACTION_ROTATED', `action id ${actionId} is no longer served`);
+
+      const refreshed = this.ensureActionId(true);
+      if (refreshed && refreshed !== actionId) {
+        console.log(`[Garmin] Action id rotated, retrying with ${refreshed}`);
+        response = this.postReplyAction(refreshed, message);
+      }
+    }
 
     const code = response.getResponseCode();
     const body = response.getContentText();
@@ -105,12 +108,39 @@ GarminSession.prototype.sendMessenger = function(message, refresh) {
     }
 
     debug(`[Garmin] Server action accepted`);
+    clearDegradation('GARMIN_DELIVERY');
     return true;
   } catch (e) {
     console.error(`[Garmin] Exception: ${e}`);
     this.actionId = null;
     return false;
   }
+};
+
+/**
+ * POST one server-action call. Returns the raw response for the caller to
+ * judge, so a retired action id can be told apart from a refused reply.
+ *
+ * @param {string} actionId
+ * @param {string} message
+ * @returns {Object} IHttpResponse
+ * @private
+ */
+GarminSession.prototype.postReplyAction = function(actionId, message) {
+  return this.http.fetch(this.pageUrl, {
+    method: 'post',
+    contentType: 'text/plain;charset=UTF-8',
+    payload: buildReplyActionBody(this.tinyUrlId, message),
+    followRedirects: true,
+    headers: {
+      'User-Agent': GARMIN.USER_AGENT,
+      'Accept': 'text/x-component',
+      'Next-Action': actionId,
+      'Referer': this.pageUrl,
+      'Origin': GARMIN.MESSENGER_ORIGIN
+    },
+    muteHttpExceptions: true
+  });
 };
 
 /**
@@ -124,7 +154,23 @@ GarminSession.prototype.sendMessenger = function(message, refresh) {
 GarminSession.prototype.ensureActionId = function(force) {
   if (this.actionId && !force) return this.actionId;
 
-  this.actionId = discoverSendReplyActionId(this.pageUrl) || GARMIN.SEND_REPLY_ACTION_ID;
+  const discovered = discoverSendReplyActionId(this.pageUrl, this.http);
+
+  if (discovered) {
+    clearDegradation('ACTION_ID_DISCOVERY');
+    this.actionId = discovered;
+    return this.actionId;
+  }
+
+  // The pinned id may well still work, and delivery carries on if it does -
+  // but silently leaning on it is the exact state that preceded the last
+  // outage, so it is reported the moment it happens rather than when it bites.
+  recordDegradation(
+    'ACTION_ID_DISCOVERY',
+    `could not read sendReplyAction from ${this.pageUrl}, using the pinned id`
+  );
+
+  this.actionId = GARMIN.SEND_REPLY_ACTION_ID;
   return this.actionId;
 };
 
@@ -159,7 +205,7 @@ GarminSession.prototype.sendLegacy = function(message, refresh) {
 
     debug(`[Garmin] Legacy POST ${this.postUrl} (${message.length} chars)`);
 
-    const response = UrlFetchApp.fetch(this.postUrl, {
+    const response = this.http.fetch(this.postUrl, {
       method: 'post',
       contentType: 'application/json',
       payload: JSON.stringify(payload),
@@ -207,7 +253,7 @@ GarminSession.prototype.sendLegacy = function(message, refresh) {
 GarminSession.prototype.ensureFormValues = function(force) {
   if (this.formValues && !force) return this.formValues;
 
-  let values = extractGarminFormValues(this.pageUrl);
+  let values = extractGarminFormValues(this.pageUrl, this.http);
 
   if (!values) {
     debug(`[Garmin] Form extraction failed, falling back to URL parameters`);
@@ -245,10 +291,11 @@ GarminSession.prototype.replyAddressFromUrl = function() {
 
 /**
  * @param {string} url - Garmin reply URL
+ * @param {Object} [httpClient] - IHttpClient; defaults to the live one
  * @returns {GarminSession}
  */
-function createGarminSession(url) {
-  return new GarminSession(url);
+function createGarminSession(url, httpClient) {
+  return new GarminSession(url, httpClient);
 }
 
 /**
@@ -409,13 +456,16 @@ function extractSendReplyActionId(js) {
  * falls back to the pinned id.
  *
  * @param {string} pageUrl
+ * @param {Object} [httpClient] - IHttpClient; defaults to the live one
  * @returns {string|null}
  */
-function discoverSendReplyActionId(pageUrl) {
+function discoverSendReplyActionId(pageUrl, httpClient) {
   if (!pageUrl) return null;
 
+  const http = httpClient || createHttpClient();
+
   try {
-    const pageResponse = UrlFetchApp.fetch(pageUrl, {
+    const pageResponse = http.fetch(pageUrl, {
       method: 'get',
       headers: { 'User-Agent': GARMIN.USER_AGENT, 'Accept': 'text/html' },
       muteHttpExceptions: true,
@@ -435,7 +485,7 @@ function discoverSendReplyActionId(pageUrl) {
 
     const probes = Math.min(chunkPaths.length, GARMIN.MAX_CHUNK_PROBES);
     for (let i = 0; i < probes; i++) {
-      const actionId = actionIdFromChunk(chunkPaths[i]);
+      const actionId = actionIdFromChunk(chunkPaths[i], http);
       if (actionId) {
         debug(`[Garmin] Discovered sendReplyAction id ${actionId} in ${chunkPaths[i]}`);
         return actionId;
@@ -454,11 +504,14 @@ function discoverSendReplyActionId(pageUrl) {
  * Read one route chunk and return the sendReplyAction id it declares, if any.
  *
  * @param {string} chunkPath - absolute path on messenger.garmin.com
+ * @param {Object} [httpClient] - IHttpClient; defaults to the live one
  * @returns {string|null}
  * @private
  */
-function actionIdFromChunk(chunkPath) {
-  const response = UrlFetchApp.fetch(GARMIN.MESSENGER_ORIGIN + chunkPath, {
+function actionIdFromChunk(chunkPath, httpClient) {
+  const http = httpClient || createHttpClient();
+
+  const response = http.fetch(GARMIN.MESSENGER_ORIGIN + chunkPath, {
     method: 'get',
     headers: { 'User-Agent': GARMIN.USER_AGENT, 'Accept': '*/*' },
     muteHttpExceptions: true,
@@ -467,6 +520,162 @@ function actionIdFromChunk(chunkPath) {
 
   if (response.getResponseCode() !== 200) return null;
   return extractSendReplyActionId(response.getContentText());
+}
+
+/**
+ * Read a header without caring how the server cased it. HTTP/2 lowercases
+ * everything, HTTP/1.1 servers do as they please.
+ *
+ * @param {Object} headers
+ * @param {string} name
+ * @returns {string|null}
+ */
+function headerValue(headers, name) {
+  if (!headers) return null;
+
+  const wanted = String(name).toLowerCase();
+  for (const key in headers) {
+    if (!Object.prototype.hasOwnProperty.call(headers, key)) continue;
+    if (String(key).toLowerCase() !== wanted) continue;
+
+    const value = headers[key];
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  return null;
+}
+
+/**
+ * Did Garmin reject the call because the action id no longer exists?
+ *
+ * This is the one unambiguous "your pinned hash is dead" signal, and it is
+ * worth separating from every other failure: it means rediscover, not retry.
+ * Next.js answers with a 404 and an x-nextjs-action-not-found header.
+ *
+ * @param {Object} response - IHttpResponse
+ * @returns {boolean}
+ */
+function isActionNotFound(response) {
+  if (!response) return false;
+  if (response.getResponseCode() !== 404) return false;
+
+  let headers = null;
+  try {
+    headers = response.getHeaders();
+  } catch (e) {
+    headers = null;
+  }
+
+  if (headerValue(headers, 'x-nextjs-action-not-found')) return true;
+
+  // Header stripped by a proxy: fall back to the body text.
+  let body = '';
+  try {
+    body = response.getContentText() || '';
+  } catch (e) {
+    body = '';
+  }
+
+  return /server action not found/i.test(body);
+}
+
+/**
+ * Exercise the live reply path without delivering anything.
+ *
+ * The call is real - same URL, same action id, same headers as a genuine
+ * reply - but the tinyUrlId is one no conversation can own, so the action
+ * runs, fails to find a recipient, and no satellite message is produced.
+ *
+ * Three outcomes, which map onto the two outages this project has had:
+ *
+ *   HEALTHY       discovery worked and the action answered. Nothing to do.
+ *   DEGRADED      discovery failed, the pinned fallback still answers. This
+ *                 is the state that held silently for weeks before delivery
+ *                 collapsed - the whole reason the canary exists.
+ *   BROKEN        the action id is not served. Real replies are being dropped
+ *                 right now.
+ *   INCONCLUSIVE  Garmin unreachable, or the stored reply id has expired and
+ *                 the page is a 404 shell. Proves nothing either way.
+ *
+ * @param {string} tinyUrlId - a reply id known to have been live
+ * @param {Object} [httpClient] - IHttpClient; defaults to the live one
+ * @returns {{status: string, detail: string, actionId: (string|null), discovered: boolean}}
+ */
+function probeGarminDelivery(tinyUrlId, httpClient) {
+  const http = httpClient || createHttpClient();
+  const pageUrl = messengerReplyUrl(tinyUrlId);
+
+  if (!pageUrl) {
+    return { status: 'INCONCLUSIVE', detail: 'no reply id to probe', actionId: null, discovered: false };
+  }
+
+  const discovered = discoverSendReplyActionId(pageUrl, http);
+  const actionId = discovered || GARMIN.SEND_REPLY_ACTION_ID;
+
+  let response;
+  try {
+    response = http.fetch(pageUrl, {
+      method: 'post',
+      contentType: 'text/plain;charset=UTF-8',
+      payload: buildReplyActionBody(GARMIN.CANARY_INVALID_ID, 'canary'),
+      followRedirects: true,
+      headers: {
+        'User-Agent': GARMIN.USER_AGENT,
+        'Accept': 'text/x-component',
+        'Next-Action': actionId,
+        'Referer': pageUrl,
+        'Origin': GARMIN.MESSENGER_ORIGIN
+      },
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    return {
+      status: 'INCONCLUSIVE',
+      detail: `probe could not reach Garmin: ${e}`,
+      actionId: actionId,
+      discovered: !!discovered
+    };
+  }
+
+  if (isActionNotFound(response)) {
+    return {
+      status: 'BROKEN',
+      detail: `sendReplyAction ${actionId} is not served - replies are being dropped`,
+      actionId: actionId,
+      discovered: !!discovered
+    };
+  }
+
+  const code = response.getResponseCode();
+
+  // The action ran and refused the impossible id. That refusal IS the pass:
+  // it can only come from code that exists and is reachable.
+  const reached = code === 200 || code === 303 || code === 500;
+
+  if (!reached) {
+    return {
+      status: 'INCONCLUSIVE',
+      detail: `unexpected HTTP ${code} from the reply route`,
+      actionId: actionId,
+      discovered: !!discovered
+    };
+  }
+
+  if (!discovered) {
+    return {
+      status: 'DEGRADED',
+      detail: 'the pinned fallback answers but the id could not be rediscovered',
+      actionId: actionId,
+      discovered: false
+    };
+  }
+
+  return {
+    status: 'HEALTHY',
+    detail: `discovered ${actionId}, action reachable (HTTP ${code})`,
+    actionId: actionId,
+    discovered: true
+  };
 }
 
 /**
@@ -518,11 +727,13 @@ function stripAdrParam(url) {
  * @param {string} pageUrl
  * @returns {{guid: string, messageId: string, replyAddress: (string|null)}|null}
  */
-function extractGarminFormValues(pageUrl) {
+function extractGarminFormValues(pageUrl, httpClient) {
+  const http = httpClient || createHttpClient();
+
   try {
     debug(`[Garmin] Fetching reply page for form values...`);
 
-    const response = UrlFetchApp.fetch(pageUrl, {
+    const response = http.fetch(pageUrl, {
       method: 'get',
       headers: {
         'User-Agent': GARMIN.USER_AGENT,

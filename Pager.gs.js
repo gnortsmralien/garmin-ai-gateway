@@ -210,19 +210,19 @@ function sendPages(targetUrl, pages, logId, startIndex, options) {
   for (let i = startIndex; i < total; i++) {
     if (i > startIndex && Date.now() > deadline) {
       console.log(`[${logId}] Out of execution budget after ${sent}/${total} pages, will resume next run`);
-      checkpointPages(messageId, pages, sent);
+      checkpointPages(messageId, pages, sent, targetUrl);
       return { success: false, reason: "TIME_BUDGET", pages: total, chars: chars, sent: sent };
     }
 
     const delivered = sendOnePage(session, pages[i], logId, i + 1, total, deadline);
 
     if (!delivered) {
-      checkpointPages(messageId, pages, sent);
+      checkpointPages(messageId, pages, sent, targetUrl);
       return { success: false, reason: `PAGE_${i + 1}_FAILED`, pages: total, chars: chars, sent: sent };
     }
 
     sent = i + 1;
-    checkpointPages(messageId, pages, sent);
+    checkpointPages(messageId, pages, sent, targetUrl);
 
     if (i < total - 1) {
       Utilities.sleep(LIMITS.PAGE_DELAY_MS);
@@ -278,7 +278,7 @@ function pageSessionKey(messageId) {
 
 /**
  * @param {string|null} messageId
- * @returns {{pages: string[], sent: number, timestamp: number}|null}
+ * @returns {{pages: string[], sent: number, timestamp: number, url: (string|null), parked: (boolean|undefined)}|null}
  */
 function loadPageSession(messageId) {
   if (!messageId) return null;
@@ -306,8 +306,9 @@ function loadPageSession(messageId) {
  * @param {string|null} messageId
  * @param {string[]} pages
  * @param {number} sent
+ * @param {string} [url] - reply URL, so a parked reply can be delivered later
  */
-function checkpointPages(messageId, pages, sent) {
+function checkpointPages(messageId, pages, sent, url) {
   if (!messageId) return;
 
   if (sent >= pages.length) {
@@ -315,7 +316,18 @@ function checkpointPages(messageId, pages, sent) {
     return;
   }
 
-  const payload = JSON.stringify({ pages: pages, sent: sent, timestamp: Date.now() });
+  // A parked reply stays parked across the checkpoints of its own drain
+  // attempt; losing the flag mid-drain would strand the answer for good,
+  // because its Gmail message is already starred.
+  const previous = loadPageSession(messageId);
+
+  const payload = JSON.stringify({
+    pages: pages,
+    sent: sent,
+    timestamp: Date.now(),
+    url: url || (previous ? previous.url : null),
+    parked: !!(previous && previous.parked)
+  });
   if (payload.length > PAGE_SESSION_MAX_BYTES) {
     debug(`[Pager] Page session too large to checkpoint (${payload.length} bytes)`);
     return;
@@ -328,6 +340,136 @@ function checkpointPages(messageId, pages, sent) {
 function clearPageSession(messageId) {
   if (!messageId) return;
   PropertiesService.getScriptProperties().deleteProperty(pageSessionKey(messageId));
+}
+
+/**
+ * Keep a reply that could not be delivered, instead of binning it.
+ *
+ * Reached when a message has spent its retries. The answer has already been
+ * generated and paid for, and the failure is almost always Garmin-side and
+ * temporary, so the pages are parked for drainPendingDeliveries to finish once
+ * delivery comes back. Its Gmail message is starred by then, so the ordinary
+ * path will never look at it again - this is the only thing that will.
+ *
+ * @param {string|null} messageId
+ * @param {string} targetUrl
+ * @returns {boolean} whether anything was parked
+ */
+function parkPendingDelivery(messageId, targetUrl) {
+  const state = loadPageSession(messageId);
+  if (!state) return false;
+
+  state.parked = true;
+  state.url = state.url || targetUrl || null;
+
+  if (!state.url) {
+    // Nowhere to deliver it to; keeping it would just leak a property.
+    clearPageSession(messageId);
+    return false;
+  }
+
+  PropertiesService.getScriptProperties().setProperty(
+    pageSessionKey(messageId),
+    JSON.stringify(state)
+  );
+
+  console.log(`[Pager] Parked ${state.pages.length - state.sent} undelivered page(s) for later`);
+  return true;
+}
+
+/**
+ * Every parked reply, oldest first.
+ *
+ * @returns {Array<{messageId: string, state: Object}>}
+ */
+function listPendingDeliveries() {
+  const allProps = PropertiesService.getScriptProperties().getProperties();
+  const pending = [];
+
+  for (const key in allProps) {
+    if (!key.startsWith('PAGES_')) continue;
+
+    try {
+      const state = JSON.parse(allProps[key]);
+      if (!state.parked || !state.pages || !state.url) continue;
+      pending.push({ messageId: key.substring('PAGES_'.length), state: state });
+    } catch (e) {
+      // cleanupOldPageSessions deals with unreadable entries.
+    }
+  }
+
+  return pending.sort(function(a, b) {
+    return (a.state.timestamp || 0) - (b.state.timestamp || 0);
+  });
+}
+
+/**
+ * Try to deliver parked replies.
+ *
+ * Bounded per run so a backlog cannot eat the budget live messages need, and
+ * age-capped because a satellite answer that arrives hours late is noise to
+ * someone who has since moved on.
+ *
+ * @param {number} deadlineMs
+ * @returns {{attempted: number, delivered: number, abandoned: number}}
+ */
+const PENDING_DRAIN_STAMP_KEY = 'PENDING_DRAIN_LAST';
+
+function drainPendingDeliveries(deadlineMs) {
+  const pending = listPendingDeliveries();
+  const result = { attempted: 0, delivered: 0, abandoned: 0, skipped: false };
+
+  if (pending.length === 0) return result;
+
+  const props = PropertiesService.getScriptProperties();
+  const last = Number(props.getProperty(PENDING_DRAIN_STAMP_KEY) || 0);
+
+  if (Date.now() - last < HEALTH.PENDING_DRAIN_INTERVAL_MS) {
+    result.skipped = true;
+    return result;
+  }
+
+  props.setProperty(PENDING_DRAIN_STAMP_KEY, String(Date.now()));
+  console.log(`[Pager] ${pending.length} parked repl(ies) waiting`);
+
+  for (let i = 0; i < pending.length; i++) {
+    if (result.attempted >= HEALTH.PENDING_DRAIN_PER_RUN) break;
+    if (Date.now() > deadlineMs) break;
+
+    const entry = pending[i];
+    const age = Date.now() - (entry.state.timestamp || 0);
+
+    if (age > HEALTH.PENDING_MAX_AGE_MS) {
+      console.error(`[Pager] Abandoning a reply parked ${Math.round(age / 60000)} min ago - too stale to send`);
+      recordDegradation(
+        'REPLY_ABANDONED',
+        `an answer was generated but never delivered, and has aged out after ${Math.round(age / 60000)} min`
+      );
+      clearPageSession(entry.messageId);
+      result.abandoned++;
+      continue;
+    }
+
+    result.attempted++;
+
+    const outcome = sendPages(
+      entry.state.url,
+      entry.state.pages,
+      'DRAIN',
+      entry.state.sent,
+      { messageId: entry.messageId, deadlineMs: deadlineMs }
+    );
+
+    if (outcome.success) {
+      console.log(`[Pager] Drained a parked reply (${outcome.pages} page(s))`);
+      clearPageSession(entry.messageId);
+      result.delivered++;
+    } else {
+      console.log(`[Pager] Parked reply still undeliverable: ${outcome.reason}`);
+    }
+  }
+
+  return result;
 }
 
 /** Drop page sessions older than LIMITS.PAGE_SESSION_TTL_MS. */
