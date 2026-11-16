@@ -70,12 +70,26 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
       };
     }
 
+    var httpCode = response.getResponseCode();
+
+    // Google sometimes wraps the body in a one-element array, most often the
+    // error envelope: [{"error": {...}}]. Unwrap it so json.error is seen.
+    if (Array.isArray(json)) {
+      console.error(`[GeminiInteractions] HTTP ${httpCode}, array-wrapped body: ${responseText.substring(0, 500)}`);
+      json = json.length === 1 && json[0] && typeof json[0] === 'object' ? json[0] : {};
+    }
+
+    // A non-2xx answer without an error object is still an error.
+    if (!json.error && (httpCode < 200 || httpCode >= 300)) {
+      json.error = { message: `HTTP ${httpCode}: ${responseText.substring(0, 300)}` };
+    }
+
     // Check for API errors
     if (json.error) {
       var errorMsg = json.error.message || "Unknown error";
-      console.error(`[GeminiInteractions] API Error: ${errorMsg}`);
+      console.error(`[GeminiInteractions] API Error (HTTP ${httpCode}): ${errorMsg}`);
 
-      var retryable = this.isErrorRetryable(errorMsg);
+      var retryable = httpCode === 429 || httpCode >= 500 || this.isErrorRetryable(errorMsg);
 
       return {
         success: false,
@@ -100,10 +114,10 @@ GeminiInteractionsClient.prototype.call = function(userMessage, systemPrompt, op
     }
 
     if (!text) {
-      console.error(`[GeminiInteractions] No text in response. Status: ${json.status}, Keys: ${Object.keys(json).join(', ')}`);
-      // Dump the steps shape so an unexpected structure is debuggable.
+      console.error(`[GeminiInteractions] No text in response. HTTP ${httpCode}, Status: ${json.status}, Keys: ${Object.keys(json).join(', ')}`);
+      // Dump the body so an unexpected structure is debuggable.
       try {
-        console.error(`[GeminiInteractions] Raw steps: ${JSON.stringify(json.steps).substring(0, 1500)}`);
+        console.error(`[GeminiInteractions] Raw body: ${String(JSON.stringify(json.steps || json)).substring(0, 1500)}`);
       } catch (dumpErr) {
         console.error(`[GeminiInteractions] Could not stringify steps: ${dumpErr}`);
       }
