@@ -218,6 +218,24 @@ function runUtilsTests() {
     props.deleteProperty("INTERACTION_sender-c");
   });
 
+  runner.test("extractSenderKey - Messenger links key on the sender, not the per-message extId (regression)", function() {
+    // Every Messenger message has a new extId; keying on it meant follow-ups
+    // never found the previous turn.
+    var a = extractSenderKey("https://messenger.garmin.com/r?extId=gSSbhysV5Ru6a4KXXGriEvQ", "Jordan Doe");
+    var b = extractSenderKey("https://messenger.garmin.com/r?extId=g6aAEIkNZoD0iZn2wc9rsPg", "jordan doe ");
+    var c = extractSenderKey("https://messenger.garmin.com/r?extId=g6aAEIkNZoD0iZn2wc9rsPg", "Someone Else");
+    assertEquals(a, b, "same sender across messages");
+    assertTrue(a !== c, "different senders stay apart");
+    assertEquals(a.indexOf("Jordan"), -1, "key should not leak the name");
+  });
+
+  runner.test("extractSenderName - reads From, falls back to the body", function() {
+    assertEquals(extractSenderName("Jordan Doe (via inReach) <no.reply.inreach@garmin.com>", ""), "Jordan Doe");
+    assertEquals(extractSenderName("\"Jordan Doe (via inReach)\" <no.reply.inreach@garmin.com>", ""), "Jordan Doe");
+    assertEquals(extractSenderName("no.reply.inreach@garmin.com", "View the location or send a reply to Test User:\nhttps://inreachlink.com/x"), "Test User");
+    assertEquals(extractSenderName("", "no name here"), null);
+  });
+
   runner.test("extractSenderKey - is stable and derived from the address", function() {
     var a = extractSenderKey("https://x/txtmsg?extId=abc&adr=me%40example.com");
     var b = extractSenderKey("https://x/txtmsg?extId=zzz&adr=me%40example.com");

@@ -125,7 +125,8 @@ function handleThread(thread, processedIds, deadline) {
   try {
     const result = processAndSend(parsed.prompt, targetUrl, logId, coords, {
       messageId: messageId,
-      deadlineMs: deadline
+      deadlineMs: deadline,
+      senderName: extractSenderName(safeGetFrom(lastMsg), body)
     });
 
     recordOutcome(lastMsg, messageId, logId, parsed.prompt, targetUrl, result);
@@ -200,6 +201,15 @@ function recordOutcome(lastMsg, messageId, logId, prompt, targetUrl, result) {
 }
 
 /** @private */
+function safeGetFrom(message) {
+  try {
+    return message.getFrom();
+  } catch (e) {
+    return "";
+  }
+}
+
+/** @private */
 function safeGetTo(message) {
   try {
     return message.getTo();
@@ -248,7 +258,7 @@ function processAndSend(userPrompt, targetUrl, logId, coords, options) {
   const sized = stripSizeOverride(userPrompt);
 
   // openConversation sees the reset command; the model must not.
-  const state = openConversation(targetUrl, sized, logId);
+  const state = openConversation(targetUrl, options.senderName, sized, logId);
   const question = stripResetPrefix(sized);
 
   if (!question) {
@@ -402,12 +412,12 @@ function resolveLengthBudget(userPrompt, logId) {
  * non-fatal - the reply just loses conversational context.
  * @private
  */
-function openConversation(targetUrl, question, logId) {
+function openConversation(targetUrl, senderName, question, logId) {
   const state = { manager: null, senderKey: null, history: [] };
 
   try {
     state.manager = createInteractionStateManager();
-    state.senderKey = extractSenderKey(targetUrl);
+    state.senderKey = extractSenderKey(targetUrl, senderName);
     state.history = state.manager.getHistory(state.senderKey, question);
   } catch (e) {
     console.error(`[${logId}] Conversation state unavailable (non-fatal): ${e}`);

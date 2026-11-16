@@ -177,23 +177,32 @@ InteractionStateManager.prototype.getStateKey = function(senderKey) {
 };
 
 /**
- * Extract sender key from Garmin message
- * Uses the reply address from the URL as unique identifier
+ * Key that groups one sender's messages into a conversation (hashed for
+ * privacy).
+ *
+ * Messenger links (since 2026-08-31) carry no adr= address, and the extId
+ * they do carry is new on every message - keying on it gave every message
+ * its own one-turn conversation, so follow-ups never had context. The sender
+ * name Garmin puts on every notification is the stable identity now.
+ *
+ * Order: legacy adr= address, then sender name, then extId as a last resort.
  *
  * @param {string} targetUrl - Garmin reply URL
- * @returns {string} - Sender key (hashed for privacy)
+ * @param {string|null} [senderName] - from extractSenderName
+ * @returns {string}
  */
-function extractSenderKey(targetUrl) {
-  var adrMatch = targetUrl.match(/adr=([^&\s]+)/);
+function extractSenderKey(targetUrl, senderName) {
+  var adrMatch = String(targetUrl || "").match(/adr=([^&\s]+)/);
   if (adrMatch) {
-    var replyAddress = decodeURIComponent(adrMatch[1]);
-    // Hash the address for privacy (simple hash for Apps Script)
-    return simpleHash(replyAddress);
+    return simpleHash(decodeURIComponent(adrMatch[1]));
   }
 
-  // Fallback to extId if address not found
-  var extIdMatch = targetUrl.match(/extId=([a-zA-Z0-9\-]+)/);
-  return extIdMatch ? extIdMatch[1] : simpleHash(targetUrl);
+  if (senderName) {
+    return simpleHash("name:" + String(senderName).trim().toLowerCase());
+  }
+
+  var extIdMatch = String(targetUrl || "").match(/extId=([a-zA-Z0-9\-_]+)/);
+  return extIdMatch ? extIdMatch[1] : simpleHash(String(targetUrl || ""));
 }
 
 /**

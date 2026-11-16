@@ -67,6 +67,25 @@ function parseAiPrompt(body) {
 }
 
 /**
+ * The inReach sender's name, which is the same on every message from one
+ * device: "Jordan Doe (via inReach) <no.reply.inreach@garmin.com>" in From,
+ * and "send a reply to Jordan Doe:" in the body.
+ *
+ * @param {string} fromHeader
+ * @param {string} body
+ * @returns {string|null}
+ */
+function extractSenderName(fromHeader, body) {
+  var fromMatch = String(fromHeader || "").match(/^\s*"?([^"<]+?)"?\s*\(via inReach\)/i);
+  if (fromMatch) return fromMatch[1].trim();
+
+  var bodyMatch = String(body || "").match(/send a reply to\s+(.+?):/i);
+  if (bodyMatch) return bodyMatch[1].trim();
+
+  return null;
+}
+
+/**
  * Find the Garmin reply link. Supports both explore.garmin.com long form and
  * inreachlink.com short form.
  *
