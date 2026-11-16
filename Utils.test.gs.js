@@ -176,18 +176,46 @@ function runUtilsTests() {
     assertEquals(stripResetPrefix("NEW"), "NEW");
   });
 
-  runner.test("interaction state - stores, reads back and expires", function() {
+  runner.test("conversation state - stores turns, reads back and resets", function() {
     var manager = createInteractionStateManager();
-    manager.clearInteractionId("sender-a");
+    manager.clearHistory("sender-a");
 
-    assertEquals(manager.getInteractionId("sender-a", "hello"), null);
+    assertEquals(manager.getHistory("sender-a", "hello").length, 0);
 
-    manager.setInteractionId("sender-a", "interactions/12345");
-    assertEquals(manager.getInteractionId("sender-a", "hello"), "interactions/12345");
+    manager.appendTurn("sender-a", [], "q1", "a1");
+    var history = manager.getHistory("sender-a", "hello");
+    assertEquals(history.length, 1);
+    assertEquals(history[0].q, "q1");
+    assertEquals(history[0].a, "a1");
 
     // An explicit reset drops it.
-    assertEquals(manager.getInteractionId("sender-a", "NEW: hello"), null);
-    assertEquals(manager.getInteractionId("sender-a", "hello"), null);
+    assertEquals(manager.getHistory("sender-a", "NEW: hello").length, 0);
+    assertEquals(manager.getHistory("sender-a", "hello").length, 0);
+  });
+
+  runner.test("conversation state - keeps only the most recent turns, under the size cap", function() {
+    var manager = createInteractionStateManager();
+    manager.clearHistory("sender-b");
+
+    var history = [];
+    for (var i = 0; i < CONVERSATION.MAX_TURNS + 3; i++) {
+      manager.appendTurn("sender-b", history, "q" + i, new Array(2000).join("x"));
+      history = manager.getHistory("sender-b", "next");
+    }
+
+    assertTrue(history.length <= CONVERSATION.MAX_TURNS, "turn cap");
+    assertEquals(history[history.length - 1].q, "q" + (CONVERSATION.MAX_TURNS + 2), "newest kept");
+    assertTrue(history[0].a.length <= CONVERSATION.MAX_ANSWER_CHARS, "answers truncated");
+    var raw = PropertiesService.getScriptProperties().getProperty("INTERACTION_sender-b");
+    assertTrue(raw.length <= CONVERSATION.MAX_STATE_CHARS, "stays under the property size limit");
+    manager.clearHistory("sender-b");
+  });
+
+  runner.test("conversation state - legacy interactionId state reads as empty history", function() {
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty("INTERACTION_sender-c", JSON.stringify({ interactionId: "interactions/1", timestamp: Date.now() }));
+    assertEquals(createInteractionStateManager().getHistory("sender-c", "hello").length, 0);
+    props.deleteProperty("INTERACTION_sender-c");
   });
 
   runner.test("extractSenderKey - is stable and derived from the address", function() {

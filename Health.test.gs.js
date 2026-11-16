@@ -354,6 +354,63 @@ function runHealthTests() {
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // AI canary
+  // ---------------------------------------------------------------------------
+
+  function fakeAi(result) {
+    var calls = [];
+    return {
+      calls: calls,
+      call: function(msg, sys, opts) { calls.push(opts); return result; }
+    };
+  }
+
+  function aiOk(modelVersion) {
+    return { success: true, text: "OK", modelVersion: modelVersion, httpCode: 200, error: null };
+  }
+
+  runner.test("runAiCanary - healthy: stamps, stays silent, uses production tools", function() {
+    resetHealthState();
+    var ai = fakeAi(aiOk(SYSTEM.MODEL_TAG));
+    var r = runAiCanary(ai);
+    assertEquals(r.status, "HEALTHY");
+    assertEquals(sentEmailCount(), 0, "healthy runs send nothing");
+    assertNotNull(PropertiesService.getScriptProperties().getProperty("AI_CANARY_LAST_OK"), "stamped");
+    assertContains(ai.calls[0].tools.join(","), "google_search");
+  });
+
+  runner.test("runAiCanary - a 402 alerts once, then Recovered when it answers again", function() {
+    resetHealthState();
+    requestAiCanary();
+    var broken = fakeAi({ success: false, httpCode: 402, error: { message: "Your prepayment credits are depleted.", retryable: false } });
+    assertEquals(runAiCanary(broken).status, "BROKEN");
+    assertEquals(runAiCanary(broken).status, "BROKEN");
+    assertEquals(sentEmailCount(), 1, "cooldown holds the second alert");
+    assertContains(sentEmails[0].body, "prepayment credits are depleted");
+    assertContains(sentEmails[0].body, "This is an outage");
+    assertEquals(PropertiesService.getScriptProperties().getProperty("AI_CANARY_LAST_OK"), null, "not stamped while broken");
+
+    assertEquals(runAiCanary(fakeAi(aiOk(SYSTEM.MODEL_TAG))).status, "HEALTHY");
+    assertContains(sentEmails[sentEmails.length - 1].subject, "Recovered: AI_GENERATION");
+  });
+
+  runner.test("runAiCanary - a silent model reroute is reported", function() {
+    resetHealthState();
+    var r = runAiCanary(fakeAi(aiOk("gemini-9-flash-lite")));
+    assertEquals(r.status, "DEGRADED");
+    assertContains(sentEmails[0].subject, "AI_MODEL_REROUTED");
+  });
+
+  runner.test("runAiCanaryIfDue - skips while fresh, runs once requested", function() {
+    resetHealthState();
+    PropertiesService.getScriptProperties().setProperty("AI_CANARY_LAST_OK", String(Date.now()));
+    assertEquals(runAiCanaryIfDue().status, "SKIPPED");
+
+    requestAiCanary();
+    assertEquals(PropertiesService.getScriptProperties().getProperty("AI_CANARY_LAST_OK"), null, "re-check scheduled");
+  });
+
   // Everything above can write to the live property store when run from the
   // Apps Script editor, so the whole suite runs inside a snapshot, and the
   // in-memory alert address is put back too.
@@ -383,7 +440,10 @@ var TOUCHED_PROPERTIES = [
   "HEALTH_ACTION_ID_DISCOVERY",
   "HEALTH_GARMIN_ACTION_ROTATED",
   "ALERT_EMAIL",
-  "LAST_REPLY_TOKEN"
+  "LAST_REPLY_TOKEN",
+  "HEALTH_AI_GENERATION",
+  "HEALTH_AI_MODEL_REROUTED",
+  "AI_CANARY_LAST_OK"
 ];
 
 /**
@@ -426,6 +486,9 @@ function resetHealthState() {
     props.deleteProperty(TOUCHED_PROPERTIES[i]);
   }
   SYSTEM.ALERT_EMAIL = "alerts@example.com";
+  // runGarminCanary also runs the AI canary when it is due. Mark it fresh so
+  // Garmin tests exercise Garmin only; AI canary tests call it directly.
+  props.setProperty("AI_CANARY_LAST_OK", String(Date.now()));
   clearSentEmails();
 }
 

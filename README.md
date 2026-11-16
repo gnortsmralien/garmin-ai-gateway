@@ -1,8 +1,8 @@
 # Garmin AI Gateway
 
-A Google Apps Script service that bridges Garmin InReach satellite messengers with AI responses via Gmail and Google Gemini Interactions API. This gateway enables remote users with satellite messengers to access frontier AI with automatic web search and URL reading, plus weather data, news, and other information tools for wilderness activities or areas without cellular coverage.
+A Google Apps Script service that bridges Garmin InReach satellite messengers with AI responses via Gmail and the Google Gemini API. This gateway enables remote users with satellite messengers to access frontier AI with automatic web search and URL reading, plus weather data, news, and other information tools for wilderness activities or areas without cellular coverage.
 
-Powered by Google's Gemini Interactions API with built-in Google Search and conversation memory.
+Powered by Google's Gemini API (stable `v1` `generateContent`, pinned model) with built-in Google Search, URL reading and conversation memory.
 
 Coded with Claude.
 
@@ -13,9 +13,9 @@ Coded with Claude.
 ## Features
 
 ### Core Capabilities
-- **AI-Powered Responses**: Uses Google Gemini Interactions API for intelligent, context-aware responses optimized for satellite messaging constraints
+- **AI-Powered Responses**: Uses the Google Gemini API for intelligent, context-aware responses optimized for satellite messaging constraints
 - **Automatic Web Search**: Built-in Google Search integration - AI automatically searches the web when needed for current information
-- **Conversation Memory**: Server-side conversation storage maintains context for 24 hours, enabling follow-up questions and multi-turn interactions
+- **Conversation Memory**: The last few question/answer pairs are kept in Script Properties for 24 hours, enabling follow-up questions and multi-turn interactions
 - **Readable Brevity**: Replies are written to a character budget (350 target, 700 hard maximum) in plain English rather than compressed into telegram-style abbreviations. A second shrink pass runs only when an answer overshoots the budget, and it is instructed to keep every safety warning, dose and quantity
 - **Resumable Pagination**: Long replies are split into pages that always fit the device limit, prefixed `1/4`, `2/4`, and delivered in order. Progress is checkpointed after each page, so a run interrupted by the Apps Script 6-minute limit or a transient Garmin failure resumes at the next unsent page instead of replaying the whole reply
 - **Retry Mechanism**: Per-page delivery retries plus message-level retry logic for temporary API failures
@@ -68,7 +68,7 @@ Users can trigger specialized tools by including keywords in their messages:
    | `Pager.gs.js` | Page splitting, ordered delivery, resume state |
    | `GarminClient.gs.js` | Garmin reply-page parsing and POSTs |
    | `Utils.gs.js` | Text shaping, retry bookkeeping, alerting |
-   | `GeminiInteractionsClient.gs.js` | Interactions API client |
+   | `GeminiClient.gs.js` | Gemini `generateContent` client (stable v1) |
    | `InteractionStateManager.gs.js` | Conversation continuity |
    | `HttpClient.gs.js` | Injectable HTTP layer used by the tools |
    | `WikipediaTool.gs.js` etc. | Individual data-source tools |
@@ -77,8 +77,8 @@ Users can trigger specialized tools by including keywords in their messages:
    optional in the editor but are pushed by default so `runAllTests()` can be run
    from the Apps Script UI.
 
-   (SearchTool.gs.js and BrowseTool.gs.js are gone - the Interactions API's
-   built-in Google Search and URL Context tools replaced them.)
+   (SearchTool.gs.js and BrowseTool.gs.js are gone - Gemini's built-in Google
+   Search and URL Context tools replaced them.)
 
 3. **Configure the manifest**
    - Click on Project Settings (gear icon)
@@ -118,7 +118,8 @@ Users can trigger specialized tools by including keywords in their messages:
      - Type: Hour timer
      - Interval: Every hour
    - This checks that Garmin reply delivery still works *without sending a
-     satellite message*, and emails you when it stops. See
+     satellite message*, and emails you when it stops. The same trigger runs
+     the AI canary every 14 days, and hourly while the AI is failing. See
      [Watching for the next break](#watching-for-the-next-break)
    - It is added by hand on purpose: installing it from code would pull the
      `script.scriptapp` OAuth scope into a project that does not otherwise use
@@ -157,7 +158,7 @@ Everything tunable lives in `Config.gs.js`.
 ```javascript
 const SYSTEM = {
   TRUSTED_EMAILS: ["no.reply.inreach@garmin.com"],  // Emails to accept messages from
-  MODEL_TAG: "gemini-flash-latest",                  // Gemini model for Interactions API
+  MODEL_TAG: "gemini-3.5-flash-lite",                // Pinned Gemini model (never a -latest alias)
   SEARCH_WINDOW: "newer_than:2d",                    // Gmail search window
   SIMULATE_GARMIN: false,                            // true = log replies instead of sending
   DEBUG_MODE: false,                                 // Verbose logging
@@ -192,7 +193,8 @@ that reply only.
 
 1. Tools that the message triggers are run, and their output (or an explicit
    failure note) becomes the TOOL CONTEXT block.
-2. One Interactions API call answers the question. The character budget is part
+2. One `generateContent` call answers the question, with the recent turns of
+   the conversation. The character budget is part
    of the prompt, and the prompt explicitly forbids telegram-style abbreviation.
 3. If the answer exceeds `AI_ABSOLUTE_MAX`, a second call shortens it while
    preserving safety warnings and numbers. Boundary-aware truncation is the last
@@ -268,6 +270,16 @@ no recipient, and no satellite message is produced. It reports one of
 | `BROKEN` | the action id is not served; replies are being dropped right now |
 | `INCONCLUSIVE` | Garmin unreachable, or the stored reply id has expired - proves nothing, so it stays quiet |
 
+**The AI canary probes the model.** Every 14 days (`HEALTH.AI_CANARY_INTERVAL_MS`)
+`runGarminCanary` also runs `runAiCanary`. That sends one tiny request in the exact
+shape of a real reply: pinned model, stable endpoint, Search and URL tools,
+thinking level. It catches every way the AI side has broken so far: a request
+format change, a response format change, billing (HTTP 402), and a silent
+reroute to a model other than the one pinned. While it is failing it re-checks
+every hour, and it emails `Recovered: AI_GENERATION` once the model answers
+again. A real message that fails for good also schedules a re-check. You can
+run `runAiCanary` by hand from the editor after changing the model pin.
+
 **Undelivered answers are kept, not binned.** A reply that survives its retries
 is parked with its pages and redelivered by `drainPendingDeliveries` once
 Garmin recovers, so an outage costs latency rather than the answer and the
@@ -297,8 +309,8 @@ GARMIN_REPLY_TOKEN=<tinyUrlId> npm run test:integration
 
 - **Email Processing** (`MessageParser.gs.js`): Monitors Gmail for InReach messages and extracts the query, the reply link and any GPS coordinates. Gmail hard-wraps the plain-text body, so the message is reassembled across lines rather than read from the first line only
 - **Garmin Reply Handling** (`GarminClient.gs.js`): Supports both legacy URLs and `inreachlink.com` short URLs, with automatic form-value extraction. One session is opened per reply and reused for every page
-- **Interactions API Client** (`GeminiInteractionsClient.gs.js`): Uses the Gemini Interactions API (`/v1beta/interactions`) with built-in Google Search and URL Context. Collects the model's prose after the last tool step, skipping reasoning steps, and detects token-limit truncation
-- **Conversation State** (`InteractionStateManager.gs.js`): Tracks interaction IDs for 24-hour continuity via server-side storage
+- **Gemini Client** (`GeminiClient.gs.js`): Stable `v1` `generateContent` with built-in Google Search and URL Context, on a pinned model. It moved off the beta Interactions API after that API changed shape twice in six weeks. Every failure carries the HTTP status and Google's own message
+- **Conversation State** (`InteractionStateManager.gs.js`): Keeps the last few question/answer pairs per sender for 24 hours in Script Properties
 - **Tool System** (`Toolbox.gs.js` + `*Tool.gs.js`): Modular tools for specialized data sources (Wikipedia, weather, news, disasters, geocoding)
 - **AI Pipeline** (`Code.js`): A single budgeted call, with a conditional shrink pass on overshoot
 - **Message Pagination** (`Pager.gs.js`): Prefix-aware splitting, ordered delivery, per-page retries and resume-after-interruption

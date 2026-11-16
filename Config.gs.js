@@ -9,7 +9,12 @@
 
 const SYSTEM = {
   TRUSTED_EMAILS: ["no.reply.inreach@garmin.com"],
-  MODEL_TAG: "gemini-flash-latest",
+  // Pinned on purpose. A "-latest" alias moves whenever Google repoints it,
+  // which is one more unannounced change for a gateway that has had plenty.
+  // gemini-3.5-flash-lite: stable, newest Flash-Lite as of 2026-11-16, supports
+  // Search grounding, URL context and thinking; $0.30 in / $2.50 out per 1M.
+  // To move: change it here, push, then run runAiCanary from the editor.
+  MODEL_TAG: "gemini-3.5-flash-lite",
   SEARCH_WINDOW: "newer_than:2d",
   SIMULATE_GARMIN: false,  // Production mode - messages sent to Garmin
   DEBUG_MODE: false,       // Set to true for verbose logging
@@ -97,7 +102,21 @@ const LIMITS = {
 // the gateway carried on as though nothing had happened, and the reply was
 // dropped at the last step. Nothing here makes Garmin more stable - it makes a
 // change VISIBLE, on a channel that does not depend on Garmin working.
+const CONVERSATION = {
+  // Earlier question/answer pairs sent with each follow-up.
+  MAX_TURNS: 5,
+  MAX_QUESTION_CHARS: 400,
+  MAX_ANSWER_CHARS: 900,
+  // Script Properties caps one value at 9 KB; stay clear of it.
+  MAX_STATE_CHARS: 8000
+};
+
 const HEALTH = {
+  // The AI canary rides on the hourly Garmin canary trigger and actually calls
+  // the model only this often while healthy. While it is failing it re-checks
+  // every hour, so recovery is noticed (and reported) quickly.
+  AI_CANARY_INTERVAL_MS: 14 * 24 * 60 * 60 * 1000,
+
   // One alert per degradation kind per window. The counter keeps rising in the
   // background, so the follow-up alert reports the true total.
   ALERT_COOLDOWN_MS: 6 * 60 * 60 * 1000,
@@ -302,7 +321,8 @@ AVAILABLE COMMANDS (mention only if the user asks what they can do)
 TOOL CONTEXT
 {{TOOL_CONTEXT}}`,
     TOKENS: 8192,
-    TEMP: 0.4
+    TEMP: 0.4,
+    THINKING: "LOW"
   },
 
   SHRINK: {
@@ -317,6 +337,7 @@ RULES
 
 OUTPUT: the shortened text and nothing else.`,
     TOKENS: 4096,
-    TEMP: 0.2
+    TEMP: 0.2,
+    THINKING: "MINIMAL"
   }
 };

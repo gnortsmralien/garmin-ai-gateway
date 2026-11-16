@@ -113,9 +113,11 @@ function degradationState(kind) {
  *
  * @param {string} kind - stable identifier, e.g. "ACTION_ID_DISCOVERY"
  * @param {string} detail - one line of context for the alert body
+ * @param {Array<string>} [explanation] - replaces the default "fallback is
+ *   holding" lines, for kinds where nothing is holding
  * @returns {number} occurrences recorded so far
  */
-function recordDegradation(kind, detail) {
+function recordDegradation(kind, detail, explanation) {
   const now = Date.now();
   const previous = degradationState(kind);
 
@@ -139,11 +141,12 @@ function recordDegradation(kind, detail) {
       `Occurrences: ${state.count}`,
       `First seen:  ${new Date(state.first).toISOString()} (${sinceFirst} min ago)`,
       `Last seen:   ${new Date(state.last).toISOString()}`,
-      ``,
+      ``
+    ].concat(explanation || [
       `This is a leading indicator, not an outage: a fallback is still holding.`,
       `The previous outage looked exactly like this for weeks before replies`,
       `stopped arriving.`
-    ].join('\n'));
+    ]).join('\n'));
 
     if (sent) state.alerted = now;
   }
@@ -237,6 +240,14 @@ function lastReplyToken() {
  * @returns {{status: string, detail: string}}
  */
 function runGarminCanary() {
+  // The AI canary shares this trigger so it needs no trigger of its own. It
+  // must not be able to stop the Garmin probe below.
+  try {
+    runAiCanaryIfDue();
+  } catch (e) {
+    console.error(`[AiCanary] Crashed (Garmin probe continues): ${e}`);
+  }
+
   const known = lastReplyToken();
 
   if (!known) {
@@ -285,3 +296,101 @@ function runGarminCanary() {
 // every existing trigger stop with "Authorization is required" until the owner
 // re-authorised by hand. Taking the gateway down to install its own watchdog
 // would be a poor trade.
+
+// =============================================================================
+// ===============================  AI CANARY  =================================
+// =============================================================================
+
+const AI_CANARY_LAST_OK_KEY = 'AI_CANARY_LAST_OK';
+
+const AI_OUTAGE_EXPLANATION = [
+  `This is an outage: the model is not answering, so every message gets`,
+  `[ERR:AI]. HTTP 402 means prepaid credits ran out (top up in AI Studio);`,
+  `400 or 404 usually means the request format or pinned model changed.`,
+  `The canary re-checks hourly and emails "Recovered" once it answers again.`
+];
+
+/**
+ * Run the AI canary if it is due: every HEALTH.AI_CANARY_INTERVAL_MS while
+ * healthy, every hour (each trigger firing) while it is failing.
+ *
+ * @returns {{status: string, detail: string}}
+ */
+function runAiCanaryIfDue() {
+  const last = Number(PropertiesService.getScriptProperties().getProperty(AI_CANARY_LAST_OK_KEY) || 0);
+  if (Date.now() - last < HEALTH.AI_CANARY_INTERVAL_MS) {
+    return { status: 'SKIPPED', detail: 'not due' };
+  }
+  return runAiCanary();
+}
+
+/**
+ * Ask the AI canary to re-check at the next trigger firing. Called when a real
+ * message fails generation for good, so the canary watches for recovery and
+ * reports it instead of staying silent for two weeks.
+ */
+function requestAiCanary() {
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(AI_CANARY_LAST_OK_KEY);
+  } catch (e) {
+    console.error(`[AiCanary] Could not schedule a re-check: ${e}`);
+  }
+}
+
+/**
+ * Check that the model still answers, through the same request shape as a real
+ * reply: pinned model, stable endpoint, Search and URL tools, thinking level.
+ * That covers every way the AI side has broken so far - request format, response
+ * format, billing - plus a silent model reroute. Cost: one tiny call.
+ *
+ * Safe to run by hand from the editor at any time.
+ *
+ * @param {Object} [client] - injected in tests
+ * @returns {{status: string, detail: string}}
+ */
+function runAiCanary(client) {
+  const props = PropertiesService.getScriptProperties();
+
+  if (!client) {
+    const key = props.getProperty('GEMINI_KEY');
+    if (!key) {
+      recordDegradation('AI_GENERATION', 'GEMINI_KEY script property is not set', AI_OUTAGE_EXPLANATION);
+      return { status: 'BROKEN', detail: 'GEMINI_KEY missing' };
+    }
+    client = createGeminiClient(key, SYSTEM.MODEL_TAG);
+  }
+
+  const result = client.call('Health check. Reply with the single word OK.', 'You are a health check. Reply with the single word OK and nothing else.', {
+    maxOutputTokens: 1024,
+    thinkingLevel: AI_CONFIG.ANSWER.THINKING,
+    tools: ['google_search', 'url_context']
+  });
+
+  if (!result.success) {
+    const detail = `HTTP ${result.httpCode}: ${result.error.message}`;
+    console.error(`[AiCanary] BROKEN ${detail}`);
+    recordDegradation('AI_GENERATION', `${SYSTEM.MODEL_TAG} - ${detail}`, AI_OUTAGE_EXPLANATION);
+    return { status: 'BROKEN', detail: detail };
+  }
+
+  props.setProperty(AI_CANARY_LAST_OK_KEY, String(Date.now()));
+  clearDegradation('AI_GENERATION');
+
+  // Google reroutes deprecated models to successors on its own schedule. The
+  // call still works, which is exactly why it would go unnoticed.
+  const served = result.modelVersion || '';
+  if (served && served.indexOf(SYSTEM.MODEL_TAG) !== 0) {
+    const detail = `pinned ${SYSTEM.MODEL_TAG}, served ${served}`;
+    console.error(`[AiCanary] DEGRADED ${detail}`);
+    recordDegradation('AI_MODEL_REROUTED', detail, [
+      `Replies still work, but Google is serving a different model than the`,
+      `one pinned in Config.gs.js (SYSTEM.MODEL_TAG). Pick a current stable`,
+      `model, update the pin, push, and run runAiCanary from the editor.`
+    ]);
+    return { status: 'DEGRADED', detail: detail };
+  }
+
+  clearDegradation('AI_MODEL_REROUTED');
+  console.log(`[AiCanary] AI healthy (${served || SYSTEM.MODEL_TAG}, answered "${result.text.substring(0, 20)}")`);
+  return { status: 'HEALTHY', detail: served || SYSTEM.MODEL_TAG };
+}

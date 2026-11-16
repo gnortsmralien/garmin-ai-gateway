@@ -260,8 +260,8 @@ function processAndSend(userPrompt, targetUrl, logId, coords, options) {
   }
 
   console.log(`[${logId}] Generating reply (target ${budget.target}, max ${budget.max} chars)...`);
-  const client = createGeminiInteractionsClient(key, SYSTEM.MODEL_TAG);
-  const reply = generateReply(client, question, toolbox.context, budget, state.previousInteractionId, logId);
+  const client = createGeminiClient(key, SYSTEM.MODEL_TAG);
+  const reply = generateReply(client, question, toolbox.context, budget, state.history, logId);
 
   if (!reply.success) {
     console.error(`[${logId}] Generation failed: ${reply.error.message}`);
@@ -271,11 +271,14 @@ function processAndSend(userPrompt, targetUrl, logId, coords, options) {
       return failure("GEMINI_RETRYABLE");
     }
 
+    // Have the AI canary re-check hourly until generation works again, so the
+    // fix is confirmed by a "Recovered" email rather than by the next message.
+    requestAiCanary();
     sendErrorToUser(targetUrl, ERROR_MESSAGES.AI_PERMANENT_FAIL.code, ERROR_MESSAGES.AI_PERMANENT_FAIL.message);
     return failure("PHASE1_FAILED");
   }
 
-  saveConversation(state, reply.interactionId, logId);
+  saveConversation(state, question, reply.text, logId);
 
   console.log(`[${logId}] FINAL: ${reply.text.length} chars`);
   debug(`[${logId}] TEXT: "${reply.text}"`);
@@ -290,15 +293,15 @@ function processAndSend(userPrompt, targetUrl, logId, coords, options) {
  * of the answering prompt, so the aggressive telegram-style compression pass is
  * no longer applied to every reply. The shrink pass only runs on overshoot.
  *
- * @param {Object} client - GeminiInteractionsClient
+ * @param {Object} client - GeminiClient
  * @param {string} question
  * @param {string} toolContext
  * @param {{target: number, max: number}} budget
- * @param {string|null} previousInteractionId
+ * @param {Array<{q: string, a: string}>} history - earlier turns, oldest first
  * @param {string} logId
- * @returns {{success: boolean, text: string, interactionId: (string|null), error: Object}}
+ * @returns {{success: boolean, text: string, error: Object}}
  */
-function generateReply(client, question, toolContext, budget, previousInteractionId, logId) {
+function generateReply(client, question, toolContext, budget, history, logId) {
   const systemPrompt = renderTemplate(AI_CONFIG.ANSWER.PROMPT, {
     TARGET: budget.target,
     TARGET_WORDS: charsToWords(budget.target),
@@ -310,9 +313,9 @@ function generateReply(client, question, toolContext, budget, previousInteractio
   const answer = client.call(question, systemPrompt, {
     maxOutputTokens: AI_CONFIG.ANSWER.TOKENS,
     temperature: AI_CONFIG.ANSWER.TEMP,
-    previousInteractionId: previousInteractionId,
-    tools: ['google_search', 'url_context'],
-    store: true
+    thinkingLevel: AI_CONFIG.ANSWER.THINKING,
+    history: history || [],
+    tools: ['google_search', 'url_context']
   });
 
   if (!answer.success) return answer;
@@ -324,7 +327,7 @@ function generateReply(client, question, toolContext, budget, previousInteractio
     text = shrinkToBudget(client, text, budget, logId);
   }
 
-  return { success: true, text: text, interactionId: answer.interactionId, error: null };
+  return { success: true, text: text, error: null };
 }
 
 /**
@@ -344,9 +347,9 @@ function shrinkToBudget(client, text, budget, logId) {
   const shrunk = client.call(text, shrinkPrompt, {
     maxOutputTokens: AI_CONFIG.SHRINK.TOKENS,
     temperature: AI_CONFIG.SHRINK.TEMP,
-    previousInteractionId: null,   // the shrink pass carries no conversation
-    tools: [],
-    store: false
+    thinkingLevel: AI_CONFIG.SHRINK.THINKING,
+    history: [],   // the shrink pass carries no conversation
+    tools: []
   });
 
   if (shrunk.success) {
@@ -393,17 +396,17 @@ function resolveLengthBudget(userPrompt, logId) {
 // =============================================================================
 
 /**
- * Look up the interaction to continue, if any. Failures here are non-fatal -
- * the reply just loses conversational context.
+ * Load the earlier turns to continue from, if any. Failures here are
+ * non-fatal - the reply just loses conversational context.
  * @private
  */
 function openConversation(targetUrl, question, logId) {
-  const state = { manager: null, senderKey: null, previousInteractionId: null };
+  const state = { manager: null, senderKey: null, history: [] };
 
   try {
     state.manager = createInteractionStateManager();
     state.senderKey = extractSenderKey(targetUrl);
-    state.previousInteractionId = state.manager.getInteractionId(state.senderKey, question);
+    state.history = state.manager.getHistory(state.senderKey, question);
   } catch (e) {
     console.error(`[${logId}] Conversation state unavailable (non-fatal): ${e}`);
   }
@@ -412,13 +415,13 @@ function openConversation(targetUrl, question, logId) {
 }
 
 /** @private */
-function saveConversation(state, interactionId, logId) {
-  if (!interactionId || !state.manager || !state.senderKey) return;
+function saveConversation(state, question, answer, logId) {
+  if (!answer || !state.manager || !state.senderKey) return;
 
   try {
-    state.manager.setInteractionId(state.senderKey, interactionId);
+    state.manager.appendTurn(state.senderKey, state.history, question, answer);
   } catch (e) {
-    console.error(`[${logId}] Error storing interaction ID: ${e}`);
+    console.error(`[${logId}] Error storing conversation turn: ${e}`);
   }
 }
 

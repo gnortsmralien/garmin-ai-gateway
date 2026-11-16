@@ -1,12 +1,14 @@
 /**
- * Interaction State Manager
- * Manages conversation state for the Gemini Interactions API
+ * Conversation State Manager
  *
- * Features:
- * - Stores interaction IDs per sender for conversation continuity
- * - Auto-expires conversations after 24 hours
- * - Supports "NEW" keyword to force fresh conversation
- * - Uses Script Properties for persistent storage
+ * Keeps a short per-sender history so follow-up questions have context.
+ * The Interactions API used to hold this server-side behind an interaction
+ * id; the stable generateContent API is stateless, so the turns live here.
+ *
+ * - Last CONVERSATION.MAX_TURNS question/answer pairs per sender
+ * - Auto-expires after SYSTEM.CONVERSATION_EXPIRY_HOURS of silence
+ * - "NEW" / "RESET" starts over
+ * - Script Properties storage, kept under the 9 KB per-value limit
  */
 
 function InteractionStateConfig(expiryHours) {
@@ -20,66 +22,72 @@ function InteractionStateManager(config) {
 }
 
 /**
- * Get interaction ID for a sender (if conversation should continue)
- * Returns null if conversation should start fresh
+ * Earlier turns to send with this question, oldest first. Empty when the
+ * conversation is new, expired or explicitly reset.
  *
- * @param {string} senderKey - Unique identifier for sender (email or message ID pattern)
- * @param {string} userPrompt - User's message (to check for NEW keyword)
- * @returns {string|null} - Previous interaction ID or null for new conversation
+ * @param {string} senderKey
+ * @param {string} userPrompt - checked for the NEW keyword
+ * @returns {Array<{q: string, a: string}>}
  */
-InteractionStateManager.prototype.getInteractionId = function(senderKey, userPrompt) {
-  // Check if user explicitly wants new conversation
+InteractionStateManager.prototype.getHistory = function(senderKey, userPrompt) {
   if (this.isNewConversationRequested(userPrompt)) {
-    console.log(`[InteractionState] User requested NEW conversation for ${senderKey}`);
-    this.clearInteractionId(senderKey);
-    return null;
+    console.log(`[ConversationState] User requested NEW conversation for ${senderKey}`);
+    this.clearHistory(senderKey);
+    return [];
   }
 
-  // Check for existing interaction
-  var stateKey = this.getStateKey(senderKey);
-  var stateData = this.properties.getProperty(stateKey);
-
+  var stateData = this.properties.getProperty(this.getStateKey(senderKey));
   if (!stateData) {
-    console.log(`[InteractionState] No previous conversation for ${senderKey}`);
-    return null;
+    console.log(`[ConversationState] No previous conversation for ${senderKey}`);
+    return [];
   }
 
   try {
     var state = JSON.parse(stateData);
-
-    // Check if conversation has expired
     var age = Date.now() - state.timestamp;
+
     if (age > this.config.expiryMs) {
-      console.log(`[InteractionState] Conversation expired for ${senderKey} (${Math.round(age / 3600000)}h old)`);
-      this.clearInteractionId(senderKey);
-      return null;
+      console.log(`[ConversationState] Conversation expired for ${senderKey} (${Math.round(age / 3600000)}h old)`);
+      this.clearHistory(senderKey);
+      return [];
     }
 
-    console.log(`[InteractionState] Continuing conversation for ${senderKey} (interaction: ${state.interactionId.substring(0, 8)}...)`);
-    return state.interactionId;
-
+    // State written before the move off the Interactions API holds only an
+    // interactionId, which means nothing to generateContent.
+    var turns = Array.isArray(state.turns) ? state.turns : [];
+    console.log(`[ConversationState] Continuing conversation for ${senderKey} (${turns.length} earlier turn(s))`);
+    return turns;
   } catch (e) {
-    console.error(`[InteractionState] Failed to parse state for ${senderKey}: ${e}`);
-    this.clearInteractionId(senderKey);
-    return null;
+    console.error(`[ConversationState] Failed to parse state for ${senderKey}: ${e}`);
+    this.clearHistory(senderKey);
+    return [];
   }
 };
 
 /**
- * Store interaction ID for a sender
+ * Record one completed turn, keeping only the most recent ones.
  *
- * @param {string} senderKey - Unique identifier for sender
- * @param {string} interactionId - Interaction ID from Gemini API
+ * @param {string} senderKey
+ * @param {Array<{q: string, a: string}>} previous - what getHistory returned
+ * @param {string} question
+ * @param {string} answer
  */
-InteractionStateManager.prototype.setInteractionId = function(senderKey, interactionId) {
-  var stateKey = this.getStateKey(senderKey);
-  var state = {
-    interactionId: interactionId,
-    timestamp: Date.now()
-  };
+InteractionStateManager.prototype.appendTurn = function(senderKey, previous, question, answer) {
+  var turns = (previous || []).concat([{
+    q: String(question || "").substring(0, CONVERSATION.MAX_QUESTION_CHARS),
+    a: String(answer || "").substring(0, CONVERSATION.MAX_ANSWER_CHARS)
+  }]);
 
-  this.properties.setProperty(stateKey, JSON.stringify(state));
-  console.log(`[InteractionState] Stored interaction for ${senderKey}: ${interactionId.substring(0, 8)}...`);
+  turns = turns.slice(-CONVERSATION.MAX_TURNS);
+
+  var serialized = JSON.stringify({ turns: turns, timestamp: Date.now() });
+  while (serialized.length > CONVERSATION.MAX_STATE_CHARS && turns.length > 1) {
+    turns = turns.slice(1);
+    serialized = JSON.stringify({ turns: turns, timestamp: Date.now() });
+  }
+
+  this.properties.setProperty(this.getStateKey(senderKey), serialized);
+  console.log(`[ConversationState] Stored ${turns.length} turn(s) for ${senderKey}`);
 };
 
 /**
@@ -87,7 +95,7 @@ InteractionStateManager.prototype.setInteractionId = function(senderKey, interac
  *
  * @param {string} senderKey - Unique identifier for sender
  */
-InteractionStateManager.prototype.clearInteractionId = function(senderKey) {
+InteractionStateManager.prototype.clearHistory = function(senderKey) {
   var stateKey = this.getStateKey(senderKey);
   this.properties.deleteProperty(stateKey);
 };
@@ -154,7 +162,7 @@ InteractionStateManager.prototype.cleanupExpired = function() {
   }
 
   if (cleaned > 0) {
-    console.log(`[InteractionState] Cleaned up ${cleaned} expired conversation states`);
+    console.log(`[ConversationState] Cleaned up ${cleaned} expired conversation states`);
   }
 
   return cleaned;

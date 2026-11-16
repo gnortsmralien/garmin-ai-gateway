@@ -24,7 +24,7 @@ function runAllTests() {
     ["Health & Canary", runHealthTests],
     ["Paging Engine", runPagerTests],
     ["Toolbox Triggers", runToolboxTests],
-    ["Gemini Interactions Client", runGeminiClientTests]
+    ["Gemini Client", runGeminiClientTests]
   ];
 
   for (var s = 0; s < suites.length; s++) {
