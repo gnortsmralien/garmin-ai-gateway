@@ -327,7 +327,7 @@ function runAiCanaryIfDue() {
 /**
  * Ask the AI canary to re-check at the next trigger firing. Called when a real
  * message fails generation for good, so the canary watches for recovery and
- * reports it instead of staying silent for two weeks.
+ * reports it instead of staying silent until the next scheduled check.
  */
 function requestAiCanary() {
   try {

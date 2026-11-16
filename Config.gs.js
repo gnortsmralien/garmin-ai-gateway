@@ -115,7 +115,8 @@ const HEALTH = {
   // The AI canary rides on the hourly Garmin canary trigger and actually calls
   // the model only this often while healthy. While it is failing it re-checks
   // every hour, so recovery is noticed (and reported) quickly.
-  AI_CANARY_INTERVAL_MS: 14 * 24 * 60 * 60 * 1000,
+  // Twice a week.
+  AI_CANARY_INTERVAL_MS: 3.5 * 24 * 60 * 60 * 1000,
 
   // One alert per degradation kind per window. The counter keeps rising in the
   // background, so the follow-up alert reports the true total.

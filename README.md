@@ -119,7 +119,7 @@ Users can trigger specialized tools by including keywords in their messages:
      - Interval: Every hour
    - This checks that Garmin reply delivery still works *without sending a
      satellite message*, and emails you when it stops. The same trigger runs
-     the AI canary every 14 days, and hourly while the AI is failing. See
+     the AI canary twice a week, and hourly while the AI is failing. See
      [Watching for the next break](#watching-for-the-next-break)
    - It is added by hand on purpose: installing it from code would pull the
      `script.scriptapp` OAuth scope into a project that does not otherwise use
@@ -270,7 +270,7 @@ no recipient, and no satellite message is produced. It reports one of
 | `BROKEN` | the action id is not served; replies are being dropped right now |
 | `INCONCLUSIVE` | Garmin unreachable, or the stored reply id has expired - proves nothing, so it stays quiet |
 
-**The AI canary probes the model.** Every 14 days (`HEALTH.AI_CANARY_INTERVAL_MS`)
+**The AI canary probes the model.** Twice a week (`HEALTH.AI_CANARY_INTERVAL_MS`)
 `runGarminCanary` also runs `runAiCanary`. That sends one tiny request in the exact
 shape of a real reply: pinned model, stable endpoint, Search and URL tools,
 thinking level. It catches every way the AI side has broken so far: a request
