@@ -108,7 +108,9 @@ function handleThread(thread, processedIds, deadline) {
 
   const parsed = parseAiPrompt(body);
   if (!parsed.ok) {
-    debug(`[runGateway] Skipping message: ${parsed.reason}`);
+    // Logged at info level on purpose: a message without the "AI:" prefix gets
+    // no reply by design, and a silent skip looks exactly like an outage.
+    console.log(`[${extractLogId(targetUrl)}] SKIPPED, no reply sent (${parsed.reason}): "${extractMessageText(body).substring(0, 60)}"`);
     lastMsg.star();
     clearRetryCount(messageId);
     return;
